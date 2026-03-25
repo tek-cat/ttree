@@ -3,9 +3,9 @@ import json
 import os
 
 def get_tmux_data():
-    # Format: window_id | window_name | pane_title | pane_current_command | session_name
+    # Format: window_id | window_name | pane_title | pane_current_command | session_name | pane_pid
     res = subprocess.run(
-        ["tmux", "list-panes", "-a", "-F", "#{window_id}\t#{window_name}\t#{pane_title}\t#{pane_current_command}\t#{session_name}"],
+        ["tmux", "list-panes", "-a", "-F", "#{window_id}\t#{window_name}\t#{pane_title}\t#{pane_current_command}\t#{session_name}\t#{pane_pid}"],
         capture_output=True, text=True, check=False
     )
 
@@ -14,7 +14,7 @@ def get_tmux_data():
     for line in lines:
         if not line: continue
         parts = line.split("\t")
-        if len(parts) >= 5:
+        if len(parts) >= 6:
 
             title = parts[2]
             data.append({
@@ -23,7 +23,8 @@ def get_tmux_data():
                 "pane_title": title,
                 "pane_title_repr": repr(title),
                 "pane_current_command": parts[3],
-                "session_name": parts[4]
+                "session_name": parts[4],
+                "pane_pid": parts[5]
             })
     return data
 

@@ -2,6 +2,7 @@ import sys
 import json
 import os
 import subprocess
+import urllib.request
 import libtmux
 from textual.app import App, ComposeResult
 from textual.widgets import DataTable, Header, Footer, Input, Label, Button
@@ -151,6 +152,7 @@ class TmuxSessionManagerApp(App):
     DataTable {
         height: 100%;
         border: solid $secondary;
+        overflow-x: hidden;
     }
     #rename_dialog {
         padding: 1 2;
@@ -239,7 +241,8 @@ class TmuxSessionManagerApp(App):
 
     def action_cursor_down(self) -> None:
         table = self.query_one(DataTable)
-        if table.cursor_coordinate.column == 1:  # Session column
+        session_col = 1 if self.session_first else 2
+        if table.cursor_coordinate.column == session_col:
             current_row = table.cursor_coordinate.row
             row_keys = list(table.rows.keys())
             if not row_keys:
@@ -276,14 +279,15 @@ class TmuxSessionManagerApp(App):
                             break
                 
                 if target_r != -1:
-                    table.move_cursor(row=target_r, column=1)
+                    table.move_cursor(row=target_r, column=session_col)
                     return
         else:
             table.action_cursor_down()
 
     def action_cursor_up(self) -> None:
         table = self.query_one(DataTable)
-        if table.cursor_coordinate.column == 1:  # Session column
+        session_col = 1 if self.session_first else 2
+        if table.cursor_coordinate.column == session_col:
             current_row = table.cursor_coordinate.row
             row_keys = list(table.rows.keys())
             if not row_keys:
@@ -321,18 +325,41 @@ class TmuxSessionManagerApp(App):
                             break
                 
                 if target_r != -1:
-                    table.move_cursor(row=target_r, column=1)
+                    table.move_cursor(row=target_r, column=session_col)
                     return
         else:
             table.action_cursor_up()
 
     def action_cursor_left(self) -> None:
-        table = self.query_one(DataTable)
-        table.move_cursor(column=1)
+        self.session_first = not self.session_first
+        self.recreate_columns()
 
     def action_cursor_right(self) -> None:
+        self.session_first = not self.session_first
+        self.recreate_columns()
+
+    def recreate_columns(self) -> None:
+        """Recreate table columns based on current preference."""
         table = self.query_one(DataTable)
-        table.move_cursor(column=2)
+        # Store current state
+        cursor_row = table.cursor_row
+        
+        table.clear(columns=True)
+        table.add_column("S", width=3)
+        if self.session_first:
+            table.add_column("Session")
+            table.add_column("Window")
+        else:
+            table.add_column("Window")
+            table.add_column("Session")
+        table.fixed_columns = 1
+        
+        # Force a full repopulate
+        self.populate_table(force_full=True)
+        
+        # Always restore cursor to column 1 (the 'primary' data column) to prevent scrolling
+        if cursor_row is not None:
+            table.move_cursor(row=cursor_row, column=1)
 
     def __init__(self):
         super().__init__()
@@ -345,6 +372,7 @@ class TmuxSessionManagerApp(App):
         self.config = load_config()
         self.first_load = True
         self.notify_enabled_windows = set()
+        self.session_first = False
 
     def action_quit(self) -> None:
         """Save configuration and quit."""
@@ -373,12 +401,13 @@ class TmuxSessionManagerApp(App):
         self.theme = "rose-pine"
         table = self.query_one(DataTable)
         table.add_column("S", width=3)
-        table.add_column("Session")
         table.add_column("Window")
+        table.add_column("Session")
+        table.fixed_columns = 1
         self.populate_table()
         self.set_interval(1.0, self.populate_table)
         table.focus()
-        # Default to Session column
+        # Default to Window column
         table.move_cursor(column=1)
 
     def action_refresh_table(self) -> None:
@@ -500,7 +529,95 @@ class TmuxSessionManagerApp(App):
         except:
             pass
 
-    def get_window_status(self, raw_w_name: str, pane_title: str, cmd: str) -> tuple[str, str]:
+    def get_opencode_status(self, pid: str) -> str:
+        """Query the opencode local API or logs for status.
+        Handles cases where pid is the shell (finds the opencode child)."""
+        try:
+            target_pid = pid
+            # 0. Find child opencode if this is a shell
+            try:
+                res = subprocess.run(["pgrep", "-P", pid], capture_output=True, text=True, check=False)
+                if res.returncode == 0:
+                    children = res.stdout.strip().split("\n")
+                    for child_pid in children:
+                        with open(f"/proc/{child_pid}/comm", "r") as f:
+                            comm = f.read().strip()
+                            if "opencode" in comm or "oc" in comm:
+                                target_pid = child_pid
+                                break
+            except:
+                pass
+
+            # 1. Try API first (fastest/most accurate)
+            try:
+                environ_path = f"/proc/{target_pid}/environ"
+                if os.path.exists(environ_path):
+                    with open(environ_path, "rb") as f:
+                        env_data = f.read().split(b"\0")
+                    env = {}
+                    for item in env_data:
+                        if b"=" in item:
+                            try:
+                                k, v = item.split(b"=", 1)
+                                env[k.decode("utf-8", errors="ignore")] = v.decode("utf-8", errors="ignore")
+                            except:
+                                pass
+                    session_id = env.get("OPENCODE_SESSION_ID")
+                    port = env.get("OPENCODE_PORT", "4096")
+                    if session_id:
+                        url = f"http://localhost:{port}/session/{session_id}"
+                        with urllib.request.urlopen(url, timeout=0.5) as response:
+                            if response.getcode() == 200:
+                                data = json.loads(response.read().decode())
+                                activity = data.get("activity", "").lower()
+                                if "thinking" in activity or "working" in activity:
+                                    return "yellow"
+                                return "green"
+            except:
+                pass
+
+            # 2. Fallback to Log Analysis (reliable busy signal)
+            try:
+                log_dir = os.path.expanduser("~/.local/share/opencode/log")
+                if os.path.exists(log_dir):
+                    logs = [f for f in os.listdir(log_dir) if f.endswith(".log")]
+                    if logs:
+                        latest_log = max(logs, key=lambda x: os.path.getmtime(os.path.join(log_dir, x)))
+                        log_path = os.path.join(log_dir, latest_log)
+                        
+                        # Read the last few lines (reverse for efficiency)
+                        # We look for the MOST RECENT session event
+                        last_event = ""
+                        with open(log_path, "rb") as f:
+                            # Seek towards end
+                            f.seek(0, os.SEEK_END)
+                            pos = f.tell()
+                            chunk_size = 4096
+                            while pos > 0 and not last_event:
+                                seek_pos = max(0, pos - chunk_size)
+                                f.seek(seek_pos)
+                                chunk = f.read(pos - seek_pos).decode("utf-8", errors="ignore")
+                                lines = chunk.split("\n")
+                                for line in reversed(lines):
+                                    if "service=bus type=session.idle publishing" in line:
+                                        last_event = "idle"
+                                        break
+                                    if "service=bus type=session.status publishing" in line:
+                                        last_event = "status"
+                                        break
+                                pos = seek_pos
+                        
+                        if last_event == "idle":
+                            return "green"
+                        if last_event == "status":
+                            return "yellow"
+            except:
+                pass
+        except:
+            pass
+        return ""
+
+    def get_window_status(self, raw_w_name: str, pane_title: str, cmd: str, pid: str = "") -> tuple[str, str]:
         """Detect status from metadata. Returns (icon, color)."""
         w_name_lower = raw_w_name.lower()
         pane_title = pane_title.strip()
@@ -508,32 +625,45 @@ class TmuxSessionManagerApp(App):
         combined_title_lower = combined_title.lower()
         shells = ["bash", "zsh", "fish", "sh", "tmux"]
         
-        # 0. Shell/Idle -> Green
-        if cmd in shells or pane_title.lower() in shells:
-            return "●", "green"
-
+        # 0. Opencode API check
+        if cmd == "opencode" and pid:
+            oc_status = self.get_opencode_status(pid)
+            if oc_status == "yellow":
+                return "●", "yellow"
+            elif oc_status == "green":
+                return "●", "green"
+        
         # 1. Thinking/Working signals (Icons and Keywords) -> Yellow
-        # These take precedence over any 'Ready' icons that might still be in the title.
-        # \u2726 = ✦ (Working), \u2802 = ⠂ (Claude Working)
-        working_icons = ["\u2726", "\u2802", "✦", "✸", "★", "✨", "❗", "✋", "⚠", "⏳", "⌛", "🔄", "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
-        working_keywords = ["thinking", "working", "processing", "running", "thought", "analyzing", "generating", "executing", "searching"]
+        # These take absolute precedence.
+        working_icons = ["\u2726", "\u2802", "✦", "✸", "★", "✨", "❗", "✋", "⚠", "⏳", "⌛", "🔄", "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏", "…"]
+        working_keywords = ["thinking", "working", "processing", "running", "thought", "analyzing", "generating", 
+                            "executing", "searching", "updating", "answering", "writing", "planning", "coding", 
+                            "building", "testing", "creating", "fixing", "improving"]
+        
+        # Word-boundary-like check for keywords to avoid partial matches
+        combined_words = set(combined_title_lower.replace("|", " ").replace(":", " ").replace("(", " ").replace(")", " ").split())
         
         if any(icon in combined_title for icon in working_icons) or \
-           any(kw in combined_title_lower for kw in working_keywords):
+           any(kw in working_keywords for kw in combined_words) or \
+           "..." in combined_title:
             return "●", "yellow"
 
         if "waiting" in combined_title_lower and "input" not in combined_title_lower:
             return "●", "yellow"
 
-        # 2. Explicit Green/Ready signals -> Green
-        # \u25c7 = ◇ (Ready), \u2733 = ✳ (Claude Task Done)
+        # 2. Shell/Idle/Explicit Ready -> Green
         ready_icons = ["\u25c7", "◇", "✓", "✔", "✅", "✳", "\u2733"]
-        if any(icon in combined_title for icon in ready_icons) or \
-           ("ready" in combined_title_lower and "not ready" not in combined_title_lower):
+        if cmd in shells or pane_title.lower() in shells or \
+           pane_title.strip().lower() in ["$", "#", "%", ">", "oc |", "oc | "] or \
+           (cmd in ["opencode", "oc"] and pane_title.startswith("OC | ")) or \
+           any(icon in combined_title for icon in ready_icons) or \
+           ("ready" in combined_title_lower and "not ready" not in combined_title_lower) or \
+           ("waiting" in combined_title_lower and "input" in combined_title_lower):
             return "●", "green"
 
         # 3. Heuristic for LLM tools
-        llm_tools = ["gemini", "claude", "opencode", "gpt", "anthropic", "openai", "ollama", "llama", "ai-", "assistant",
+        llm_tools = ["gemini", "claude", "opencode", "oc", "gpt", "anthropic", "openai", "ollama", "llama", "ai-", "assistant",
+                     "aider", "continue", "supermaven", "copilot", "ghostwriter", "cursor", "deepseek", "mistral", "grok", "perplexity", "cohere",
                      "g1", "g2", "g3", "g4", "g5", "g6", "g7", "g8", "g9",
                      "c1", "c2", "c3", "c4", "c5", "c6", "c7", "c8", "c9"]
         
@@ -541,14 +671,9 @@ class TmuxSessionManagerApp(App):
                  any(tool == w_name_lower or f"{tool}:" in w_name_lower or f" {tool}" in w_name_lower for tool in llm_tools)
         
         if is_llm:
-            # Special case for opencode idle state (as a fallback)
-            # Only treat as green if it is JUST the prompt, not with a task attached.
-            if "opencode" in cmd and pane_title.lower() in ["oc", "oc ", "oc |", "oc | "]:
-                return "●", "green"
-
             # For known LLM tools and interpreters, treat as Green only if explicitly idle.
-            if cmd in ["node", "python", "python3", "claude", "opencode"]:
-                if pane_title.lower() in [w_name_lower, "node", "python", "terminal", "claude", "opencode", ""]:
+            if cmd in ["node", "python", "python3", "claude", "opencode", "oc", "aider"]:
+                if pane_title.lower() in [w_name_lower, "node", "python", "terminal", "claude", "opencode", "oc", "aider", ""]:
                     return "●", "green"
             
             # Default for LLMs is Yellow (Working/Waiting)
@@ -560,7 +685,7 @@ class TmuxSessionManagerApp(App):
             
         return "", ""
 
-    def populate_table(self) -> None:
+    def populate_table(self, force_full: bool = False) -> None:
         """Fetch tmux data and update the table surgically."""
         if self.is_refreshing:
             return
@@ -576,9 +701,9 @@ class TmuxSessionManagerApp(App):
         try:
             # Use direct tmux call for speed and freshness
             # Use tab as delimiter to avoid issues with pipes in titles/commands
-            # Format: window_id | window_name | pane_title | pane_current_command | session_id | session_name | window_index
+            # Format: window_id | window_name | pane_title | pane_current_command | session_id | session_name | window_index | pane_pid
             res = subprocess.run(
-                ["tmux", "list-windows", "-a", "-F", "#{window_id}\t#{window_name}\t#{pane_title}\t#{pane_current_command}\t#{session_id}\t#{session_name}\t#{window_index}"],
+                ["tmux", "list-windows", "-a", "-F", "#{window_id}\t#{window_name}\t#{pane_title}\t#{pane_current_command}\t#{session_id}\t#{session_name}\t#{window_index}\t#{pane_pid}"],
                 capture_output=True, text=True, check=False
             )
 
@@ -587,7 +712,7 @@ class TmuxSessionManagerApp(App):
             for line in lines:
                 if not line: continue
                 parts = line.split("\t")
-                if len(parts) >= 7:
+                if len(parts) >= 8:
                     raw_data.append({
                         "w_id": parts[0],
                         "w_name": parts[1],
@@ -595,7 +720,8 @@ class TmuxSessionManagerApp(App):
                         "p_cmd": parts[3],
                         "s_id": parts[4],
                         "s_name": parts[5],
-                        "w_index": parts[6]
+                        "w_index": parts[6],
+                        "p_pid": parts[7]
                     })
 
             # Sort by session name then window index
@@ -638,7 +764,7 @@ class TmuxSessionManagerApp(App):
                 if self.first_load and s_name == last_session_name and raw_w_name == last_window_name:
                     last_selected_id = w_id
 
-                status_icon, status_color = self.get_window_status(raw_w_name, win["p_title"], win["p_cmd"])
+                status_icon, status_color = self.get_window_status(raw_w_name, win["p_title"], win["p_cmd"], win["p_pid"])
                 
                 # Check for notification trigger
                 if w_id in self.notify_enabled_windows and not self.first_load:
@@ -670,16 +796,20 @@ class TmuxSessionManagerApp(App):
                 if new_ids and not hasattr(self, 'target_window_after_refresh'):
                     self.target_window_after_refresh = list(new_ids)[0]
 
-            # Clear and repopulate if the set of windows or their order changed
+            # Clear and repopulate if the set of windows or their order changed, or if forced
             current_keys = [str(k.value) for k in table.rows.keys()]
-            if current_keys != updated_window_ids:
+            if current_keys != updated_window_ids or force_full:
                 table.clear()
                 for w_id in updated_window_ids:
                     meta = new_metadata[w_id]
                     st_text = Text(meta["status_icon"], style=meta["status_color"]) if meta["status_icon"] else Text("")
                     if w_id in self.notify_enabled_windows:
                         st_text.append("🔔", style="white")
-                    table.add_row(st_text, meta["display_session_name"], meta["display_window_name"], key=w_id)
+                    
+                    if self.session_first:
+                        table.add_row(st_text, meta["display_session_name"], meta["display_window_name"], key=w_id)
+                    else:
+                        table.add_row(st_text, meta["display_window_name"], meta["display_session_name"], key=w_id)
             else:
                 # Just update cells if the order is the same
                 column_keys = list(table.columns.keys())
@@ -698,9 +828,14 @@ class TmuxSessionManagerApp(App):
                         st_text = Text(meta["status_icon"], style=meta["status_color"]) if meta["status_icon"] else Text("")
                         if w_id in self.notify_enabled_windows:
                             st_text.append("🔔", style="white")
+                        
                         table.update_cell(w_id, column_keys[0], st_text)
-                        table.update_cell(w_id, column_keys[1], meta["display_session_name"])
-                        table.update_cell(w_id, column_keys[2], meta["display_window_name"])
+                        if self.session_first:
+                            table.update_cell(w_id, column_keys[1], meta["display_session_name"])
+                            table.update_cell(w_id, column_keys[2], meta["display_window_name"])
+                        else:
+                            table.update_cell(w_id, column_keys[1], meta["display_window_name"])
+                            table.update_cell(w_id, column_keys[2], meta["display_session_name"])
 
             self.old_notify_enabled_windows = set(self.notify_enabled_windows)
             self.row_metadata = new_metadata
