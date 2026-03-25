@@ -513,17 +513,19 @@ class TmuxSessionManagerApp(App):
         w_id = metadata["window_id"]
         if w_id in self.notify_enabled_windows:
             self.notify_enabled_windows.remove(w_id)
+            self.trigger_notification("Notifications Disabled", f"Notifications turned OFF for '{metadata['window_name']}'")
         else:
             self.notify_enabled_windows.add(w_id)
+            self.trigger_notification("Notifications Enabled", f"Notifications turned ON for '{metadata['window_name']}'")
         
         self.populate_table()
 
     @work(thread=True)
-    def trigger_notification(self, window_name: str, session_name: str) -> None:
+    def trigger_notification(self, title: str, message: str) -> None:
         """Send a system notification."""
         try:
             subprocess.run(
-                ["notify-send", "Tmux Task Finished", f"Window '{window_name}' in session '{session_name}' is Ready!"],
+                ["notify-send", title, message],
                 check=False
             )
         except:
@@ -534,21 +536,85 @@ class TmuxSessionManagerApp(App):
         Handles cases where pid is the shell (finds the opencode child)."""
         try:
             target_pid = pid
-            # 0. Find child opencode if this is a shell
+            # 0. Find child opencode or descendant
             try:
-                res = subprocess.run(["pgrep", "-P", pid], capture_output=True, text=True, check=False)
-                if res.returncode == 0:
-                    children = res.stdout.strip().split("\n")
-                    for child_pid in children:
-                        with open(f"/proc/{child_pid}/comm", "r") as f:
-                            comm = f.read().strip()
-                            if "opencode" in comm or "oc" in comm:
-                                target_pid = child_pid
-                                break
+                # Use pgrep -P to find ALL descendants by recursively checking children
+                def find_opencode(p):
+                    res = subprocess.run(["pgrep", "-P", p], capture_output=True, text=True, check=False)
+                    if res.returncode == 0:
+                        children = res.stdout.strip().split("\n")
+                        for child_pid in children:
+                            with open(f"/proc/{child_pid}/comm", "r") as f:
+                                comm = f.read().strip()
+                                if "opencode" in comm or "oc" in comm:
+                                    return child_pid
+                                # If not opencode, check ITS children
+                                found = find_opencode(child_pid)
+                                if found: return found
+                    return None
+                
+                # First check if the pid itself is opencode
+                with open(f"/proc/{pid}/comm", "r") as f:
+                    comm = f.read().strip()
+                    if "opencode" in comm or "oc" in comm:
+                        target_pid = pid
+                    else:
+                        found = find_opencode(pid)
+                        if found: target_pid = found
             except:
                 pass
 
-            # 1. Try API first (fastest/most accurate)
+            # 1. Try to find the specific log file via /proc/target_pid/fd
+            try:
+                fd_path = f"/proc/{target_pid}/fd"
+                if os.path.exists(fd_path):
+                    for fd in os.listdir(fd_path):
+                        try:
+                            fd_full_path = os.path.join(fd_path, fd)
+                            link = os.readlink(fd_full_path)
+                            if "opencode/log" in link and (".log" in link or "log" in link.lower()):
+                                # We found the log file for THIS process
+                                last_event = ""
+                                # Use fd_full_path (/proc/PID/fd/N) to read even if deleted/rotated
+                                with open(fd_full_path, "rb") as f:
+                                    f.seek(0, os.SEEK_END)
+                                    pos = f.tell()
+                                    chunk_size = 4096
+                                    while pos > 0 and not last_event:
+                                        seek_pos = max(0, pos - chunk_size)
+                                        f.seek(seek_pos)
+                                        chunk = f.read(pos - seek_pos).decode("utf-8", errors="ignore")
+                                        lines = chunk.split("\n")
+                                        for line in reversed(lines):
+                                            if "service=bus type=session.idle publishing" in line:
+                                                last_event = "idle"
+                                                break
+                                            # Definitely working signals
+                                            if any(kw in line for kw in ["type=message.part.delta", "status=started resolveTools", "stream"]):
+                                                last_event = "status"
+                                                break
+                                            # Feedback signals
+                                            if any(kw in line for kw in ["type=session.error", "type=question.asked"]):
+                                                last_event = "feedback"
+                                                break
+                                            if "status=started question" in line or "ask_user" in line:
+                                                last_event = "feedback"
+                                                break
+                                            # Neutral signals (often happen after idle)
+                                            # type=session.status, type=session.updated, type=message.updated
+                                            # We DON'T break for these, we keep looking for idle or real working signals
+                                        pos = seek_pos
+                                
+                                if last_event:
+                                    if last_event == "idle": return "green"
+                                    if last_event == "status": return "yellow"
+                                    if last_event == "feedback": return "red"
+                        except:
+                            continue
+            except:
+                pass
+
+            # 2. Try API (only if target_pid is correct)
             try:
                 environ_path = f"/proc/{target_pid}/environ"
                 if os.path.exists(environ_path):
@@ -570,47 +636,57 @@ class TmuxSessionManagerApp(App):
                             if response.getcode() == 200:
                                 data = json.loads(response.read().decode())
                                 activity = data.get("activity", "").lower()
-                                if "thinking" in activity or "working" in activity:
+                                if any(kw in activity for kw in ["waiting", "feedback", "question", "input", "confirm", "approve", "plan"]):
+                                    return "red"
+                                if any(kw in activity for kw in ["thinking", "working", "processing", "analyzing", "generating", "executing"]):
                                     return "yellow"
                                 return "green"
             except:
                 pass
 
-            # 2. Fallback to Log Analysis (reliable busy signal)
+            # 3. Fallback to global log analysis (latest 3 logs)
             try:
                 log_dir = os.path.expanduser("~/.local/share/opencode/log")
                 if os.path.exists(log_dir):
-                    logs = [f for f in os.listdir(log_dir) if f.endswith(".log")]
+                    logs = [os.path.join(log_dir, f) for f in os.listdir(log_dir) if f.endswith(".log")]
                     if logs:
-                        latest_log = max(logs, key=lambda x: os.path.getmtime(os.path.join(log_dir, x)))
-                        log_path = os.path.join(log_dir, latest_log)
+                        # Sort by mtime descending to check newest logs first
+                        logs.sort(key=lambda x: os.path.getmtime(x), reverse=True)
                         
-                        # Read the last few lines (reverse for efficiency)
-                        # We look for the MOST RECENT session event
-                        last_event = ""
-                        with open(log_path, "rb") as f:
-                            # Seek towards end
-                            f.seek(0, os.SEEK_END)
-                            pos = f.tell()
-                            chunk_size = 4096
-                            while pos > 0 and not last_event:
-                                seek_pos = max(0, pos - chunk_size)
-                                f.seek(seek_pos)
-                                chunk = f.read(pos - seek_pos).decode("utf-8", errors="ignore")
-                                lines = chunk.split("\n")
-                                for line in reversed(lines):
-                                    if "service=bus type=session.idle publishing" in line:
-                                        last_event = "idle"
-                                        break
-                                    if "service=bus type=session.status publishing" in line:
-                                        last_event = "status"
-                                        break
-                                pos = seek_pos
-                        
-                        if last_event == "idle":
-                            return "green"
-                        if last_event == "status":
-                            return "yellow"
+                        for log_path in logs[:3]:  # Check up to 3 most recent logs
+                            last_event = ""
+                            with open(log_path, "rb") as f:
+                                # Seek towards end
+                                f.seek(0, os.SEEK_END)
+                                pos = f.tell()
+                                chunk_size = 4096
+                                while pos > 0 and not last_event:
+                                    seek_pos = max(0, pos - chunk_size)
+                                    f.seek(seek_pos)
+                                    chunk = f.read(pos - seek_pos).decode("utf-8", errors="ignore")
+                                    lines = chunk.split("\n")
+                                    for line in reversed(lines):
+                                        if "service=bus type=session.idle publishing" in line:
+                                            last_event = "idle"
+                                            break
+                                        if any(kw in line for kw in ["type=message.part.delta", "status=started resolveTools", "stream"]):
+                                            last_event = "status"
+                                            break
+                                        if any(kw in line for kw in ["type=session.error", "type=question.asked"]):
+                                            last_event = "feedback"
+                                            break
+                                        if "status=started question" in line or "ask_user" in line:
+                                            last_event = "feedback"
+                                            break
+                                        # Neutral signals (often happen after idle)
+                                        # type=session.status, type=session.updated, type=message.updated
+                                        # We DON'T break for these, we keep looking for idle or real working signals
+                                    pos = seek_pos
+                            
+                            if last_event:
+                                if last_event == "idle": return "green"
+                                if last_event == "status": return "yellow"
+                                if last_event == "feedback": return "red"
             except:
                 pass
         except:
@@ -628,14 +704,25 @@ class TmuxSessionManagerApp(App):
         # 0. Opencode API check
         if cmd == "opencode" and pid:
             oc_status = self.get_opencode_status(pid)
-            if oc_status == "yellow":
+            if oc_status == "red":
+                return "●", "red"
+            elif oc_status == "yellow":
                 return "●", "yellow"
             elif oc_status == "green":
                 return "●", "green"
         
-        # 1. Thinking/Working signals (Icons and Keywords) -> Yellow
-        # These take absolute precedence.
-        working_icons = ["\u2726", "\u2802", "✦", "✸", "★", "✨", "❗", "✋", "⚠", "⏳", "⌛", "🔄", "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏", "…"]
+        # 1. Action Required / Input Needed -> Red
+        # Specifically for AI agents like Gemini and Claude
+        input_required_icons = ["✋", "⏹", "❗", "⚠"]
+        input_required_keywords = ["action required", "waiting for input", "confirm", "approve", "feedback", "plan ready"]
+        
+        if any(icon in combined_title for icon in input_required_icons) or \
+           any(kw in combined_title_lower for kw in input_required_keywords):
+            return "●", "red"
+
+        # 2. Thinking/Working signals (Icons and Keywords) -> Yellow
+        # These take absolute precedence after Action Required.
+        working_icons = ["\u2726", "\u2802", "✦", "✸", "★", "✨", "⏳", "⌛", "🔄", "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏", "…"]
         working_keywords = ["thinking", "working", "processing", "running", "thought", "analyzing", "generating", 
                             "executing", "searching", "updating", "answering", "writing", "planning", "coding", 
                             "building", "testing", "creating", "fixing", "improving"]
@@ -651,7 +738,7 @@ class TmuxSessionManagerApp(App):
         if "waiting" in combined_title_lower and "input" not in combined_title_lower:
             return "●", "yellow"
 
-        # 2. Shell/Idle/Explicit Ready -> Green
+        # 3. Shell/Idle/Explicit Ready -> Green
         ready_icons = ["\u25c7", "◇", "✓", "✔", "✅", "✳", "\u2733"]
         if cmd in shells or pane_title.lower() in shells or \
            pane_title.strip().lower() in ["$", "#", "%", ">", "oc |", "oc | "] or \
@@ -770,9 +857,12 @@ class TmuxSessionManagerApp(App):
                 if w_id in self.notify_enabled_windows and not self.first_load:
                     old_meta = self.row_metadata.get(w_id, {})
                     old_color = old_meta.get("status_color")
-                    # Trigger if we transitioned from something else TO green
+                    # Trigger if we transitioned from something else TO green (Ready)
                     if old_color and old_color != "green" and status_color == "green":
-                        self.trigger_notification(raw_w_name, s_name)
+                        self.trigger_notification("Tmux Task Finished", f"Window '{raw_w_name}' in session '{s_name}' is Ready!")
+                    # Trigger if we transitioned TO red (Feedback Required)
+                    elif status_color == "red" and old_color != "red":
+                        self.trigger_notification("AI Feedback Required", f"Window '{raw_w_name}' in session '{s_name}' needs input!")
 
                 new_metadata[w_id] = {
                     "session_id": s_id,
