@@ -152,7 +152,6 @@ class TmuxSessionManagerApp(App):
     DataTable {
         height: 100%;
         border: solid $secondary;
-        overflow-x: hidden;
     }
     #rename_dialog {
         padding: 1 2;
@@ -215,8 +214,8 @@ class TmuxSessionManagerApp(App):
         Binding("n", "new_session", "New Session"),
         Binding("w", "rename_window", "Rename Window"),
         Binding("s", "rename_session", "Rename Session"),
-        Binding("d", "delete_target", "Delete Window"),
-        Binding("N", "toggle_notifications", "Toggle Notification"),
+        Binding("d", "delete_target", "Delete Pane"),
+        Binding("N", "toggle_notifications", "Toggle Alert"),
         Binding("R", "refresh_table", "Refresh"),
         Binding("j", "cursor_down", "Down", show=False),
         Binding("k", "cursor_up", "Up", show=False),
@@ -241,101 +240,117 @@ class TmuxSessionManagerApp(App):
 
     def action_cursor_down(self) -> None:
         table = self.query_one(DataTable)
-        session_col = 1 if self.session_first else 2
-        if table.cursor_coordinate.column == session_col:
-            current_row = table.cursor_coordinate.row
-            row_keys = list(table.rows.keys())
-            if not row_keys:
-                return
-            
-            current_meta = self.row_metadata.get(row_keys[current_row].value)
-            if not current_meta:
-                return
-            
-            # Find the first row of the *next* session
-            next_session_id = None
+        # Dynamic column indices
+        if self.view_mode == 0: session_col, window_col = 1, 2
+        elif self.view_mode == 1: session_col, window_col = 3, 1
+        else: session_col, window_col = 2, 3
+        
+        current_row = table.cursor_row
+        if current_row is None: return
+        row_keys = list(table.rows.keys())
+        current_meta = self.row_metadata.get(row_keys[current_row].value)
+        if not current_meta: return
+
+        target_col = table.cursor_coordinate.column
+        if target_col == session_col:
+            # Find first row of NEXT session
             for r in range(current_row + 1, len(row_keys)):
                 meta = self.row_metadata.get(row_keys[r].value)
                 if meta and meta["session_id"] != current_meta["session_id"]:
-                    next_session_id = meta["session_id"]
-                    break
-            
-            if next_session_id:
-                # Find the target window row for that session
-                last_w_id = self.session_last_window.get(next_session_id)
-                target_r = -1
-                if last_w_id:
-                    try:
-                        target_r = table.get_row_index(last_w_id)
-                    except Exception:
-                        pass
-                
-                if target_r == -1:
-                    # Default to the first row of that session (the one that has display_session_name)
-                    for r in range(current_row + 1, len(row_keys)):
-                        meta = self.row_metadata.get(row_keys[r].value)
-                        if meta and meta["session_id"] == next_session_id:
-                            target_r = r
-                            break
-                
-                if target_r != -1:
-                    table.move_cursor(row=target_r, column=session_col)
+                    # Try to restore last known window/pane for this session
+                    last_w_id = self.session_last_window.get(meta["session_id"])
+                    last_p_id = self.window_last_pane.get(last_w_id) if last_w_id else None
+                    target_p_id = last_p_id if last_p_id in self.row_metadata else meta["pane_id"]
+                    
+                    table.move_cursor(row=table.get_row_index(target_p_id), column=session_col)
                     return
-        else:
-            table.action_cursor_down()
+        elif target_col == window_col:
+            # Find first row of NEXT window
+            for r in range(current_row + 1, len(row_keys)):
+                meta = self.row_metadata.get(row_keys[r].value)
+                if meta and meta["window_id"] != current_meta["window_id"]:
+                    # Try to restore last known pane for this window
+                    last_p_id = self.window_last_pane.get(meta["window_id"])
+                    target_p_id = last_p_id if last_p_id in self.row_metadata else meta["pane_id"]
+                    
+                    table.move_cursor(row=table.get_row_index(target_p_id), column=window_col)
+                    return
+        
+        table.action_cursor_down()
 
     def action_cursor_up(self) -> None:
         table = self.query_one(DataTable)
-        session_col = 1 if self.session_first else 2
-        if table.cursor_coordinate.column == session_col:
-            current_row = table.cursor_coordinate.row
-            row_keys = list(table.rows.keys())
-            if not row_keys:
-                return
-            
-            current_meta = self.row_metadata.get(row_keys[current_row].value)
-            if not current_meta:
-                return
-            
-            # Find the *first* row of the *previous* session
-            prev_session_id = None
+        # Dynamic column indices
+        if self.view_mode == 0: session_col, window_col = 1, 2
+        elif self.view_mode == 1: session_col, window_col = 3, 1
+        else: session_col, window_col = 2, 3
+        
+        current_row = table.cursor_row
+        if current_row is None: return
+        row_keys = list(table.rows.keys())
+        current_meta = self.row_metadata.get(row_keys[current_row].value)
+        if not current_meta: return
+
+        target_col = table.cursor_coordinate.column
+        if target_col == session_col:
+            # Find first row of PREVIOUS session
+            target_session_id = None
             for r in range(current_row - 1, -1, -1):
                 meta = self.row_metadata.get(row_keys[r].value)
                 if meta and meta["session_id"] != current_meta["session_id"]:
-                    prev_session_id = meta["session_id"]
+                    target_session_id = meta["session_id"]
                     break
             
-            if prev_session_id:
-                # Find the target window row for that session
-                last_w_id = self.session_last_window.get(prev_session_id)
-                target_r = -1
-                if last_w_id:
-                    try:
-                        target_r = table.get_row_index(last_w_id)
-                    except Exception:
-                        pass
+            if target_session_id:
+                # Need to find the first pane row of THIS specific session
+                first_pane_meta = None
+                for r in range(len(row_keys)):
+                    meta = self.row_metadata.get(row_keys[r].value)
+                    if meta and meta["session_id"] == target_session_id:
+                        first_pane_meta = meta
+                        break
                 
-                if target_r == -1:
-                    # Default to the first row of that session (the one that has display_session_name)
-                    # We need to find the *first* row of this session
-                    for r in range(0, current_row):
-                        meta = self.row_metadata.get(row_keys[r].value)
-                        if meta and meta["session_id"] == prev_session_id:
-                            target_r = r
-                            break
-                
-                if target_r != -1:
-                    table.move_cursor(row=target_r, column=session_col)
+                if first_pane_meta:
+                    last_w_id = self.session_last_window.get(target_session_id)
+                    last_p_id = self.window_last_pane.get(last_w_id) if last_w_id else None
+                    target_p_id = last_p_id if last_p_id in self.row_metadata else first_pane_meta["pane_id"]
+                    
+                    table.move_cursor(row=table.get_row_index(target_p_id), column=session_col)
                     return
-        else:
-            table.action_cursor_up()
+        elif target_col == window_col:
+            # Find first row of PREVIOUS window
+            target_window_id = None
+            for r in range(current_row - 1, -1, -1):
+                meta = self.row_metadata.get(row_keys[r].value)
+                if meta and meta["window_id"] != current_meta["window_id"]:
+                    target_window_id = meta["window_id"]
+                    break
+            
+            if target_window_id:
+                # Find first pane row of THIS specific window
+                first_pane_meta = None
+                for r in range(len(row_keys)):
+                    meta = self.row_metadata.get(row_keys[r].value)
+                    if meta and meta["window_id"] == target_window_id:
+                        first_pane_meta = meta
+                        break
+                
+                if first_pane_meta:
+                    last_p_id = self.window_last_pane.get(target_window_id)
+                    target_p_id = last_p_id if last_p_id in self.row_metadata else first_pane_meta["pane_id"]
+                    
+                    table.move_cursor(row=table.get_row_index(target_p_id), column=window_col)
+                    return
+        
+        table.action_cursor_up()
+
 
     def action_cursor_left(self) -> None:
-        self.session_first = not self.session_first
+        self.view_mode = (self.view_mode - 1) % 3
         self.recreate_columns()
 
     def action_cursor_right(self) -> None:
-        self.session_first = not self.session_first
+        self.view_mode = (self.view_mode + 1) % 3
         self.recreate_columns()
 
     def recreate_columns(self) -> None:
@@ -346,20 +361,30 @@ class TmuxSessionManagerApp(App):
         
         table.clear(columns=True)
         table.add_column("S", width=3)
-        if self.session_first:
+        
+        if self.view_mode == 0:
             table.add_column("Session")
             table.add_column("Window")
+            table.add_column("Pane")
+        elif self.view_mode == 1:
+            table.add_column("Window")
+            table.add_column("Pane")
+            table.add_column("Session")
         else:
-            table.add_column("Window")
+            table.add_column("Pane")
             table.add_column("Session")
+            table.add_column("Window")
+            
         table.fixed_columns = 1
+        log_debug(f"Columns set (Mode {self.view_mode})")
         
         # Force a full repopulate
         self.populate_table(force_full=True)
         
-        # Always restore cursor to column 1 (the 'primary' data column) to prevent scrolling
+        # Always restore cursor to a valid column (usually column 1)
         if cursor_row is not None:
-            table.move_cursor(row=cursor_row, column=1)
+            new_col = min(1, len(table.columns) - 1) if len(table.columns) > 0 else 0
+            table.move_cursor(row=cursor_row, column=new_col)
 
     def __init__(self):
         super().__init__()
@@ -367,12 +392,14 @@ class TmuxSessionManagerApp(App):
         self.is_refreshing = False
         self.last_switched_target = None
         self.session_last_window = {}
-        # Store metadata about rows: {row_key: metadata_dict}
+        self.window_last_pane = {}
         self.row_metadata = {}
         self.config = load_config()
         self.first_load = True
         self.notify_enabled_windows = set()
-        self.session_first = False
+        self.view_mode = 0
+        self.switch_cooldown_until = 0
+
 
     def action_quit(self) -> None:
         """Save configuration and quit."""
@@ -399,16 +426,9 @@ class TmuxSessionManagerApp(App):
         """Populate the table when the app starts and start the refresh timer."""
         self.register_theme(ROSE_PINE)
         self.theme = "rose-pine"
-        table = self.query_one(DataTable)
-        table.add_column("S", width=3)
-        table.add_column("Window")
-        table.add_column("Session")
-        table.fixed_columns = 1
-        self.populate_table()
+        self.recreate_columns()
         self.set_interval(1.0, self.populate_table)
-        table.focus()
-        # Default to Window column
-        table.move_cursor(column=1)
+        self.query_one(DataTable).focus()
 
     def action_refresh_table(self) -> None:
         """Refresh the table data."""
@@ -471,7 +491,7 @@ class TmuxSessionManagerApp(App):
             pass
 
     def action_delete_target(self) -> None:
-        """Delete the currently selected window/session."""
+        """Delete the currently selected pane."""
         table = self.query_one(DataTable)
         if table.cursor_row is None:
             return
@@ -484,23 +504,18 @@ class TmuxSessionManagerApp(App):
         def handle_delete(confirmed: bool) -> None:
             if confirmed:
                 try:
-                    session = self.server.sessions.get(id=metadata["session_id"])
-                    if session:
-                        window = session.windows.get(id=metadata["window_id"])
-                        if window:
-                            # Reset last switched target to force a switch after refresh
-                            self.last_switched_target = None
-                            window.kill()
+                    # Kill the specific pane
+                    subprocess.run(["tmux", "kill-pane", "-t", metadata["pane_id"]], check=False)
                     
                     # Explicitly refresh immediately
                     self.populate_table()
-                except Exception as e:
+                except Exception:
                     pass
 
-        self.push_screen(DeleteConfirmModal(metadata["window_name"]), handle_delete)
+        self.push_screen(DeleteConfirmModal(f"{metadata['window_name']}:{metadata['pane_title']}"), handle_delete)
 
     def action_toggle_notifications(self) -> None:
-        """Toggle system notifications for the currently selected window."""
+        """Toggle system notifications for the currently selected pane."""
         table = self.query_one(DataTable)
         if table.cursor_row is None:
             return
@@ -510,13 +525,13 @@ class TmuxSessionManagerApp(App):
         if not metadata:
             return
 
-        w_id = metadata["window_id"]
-        if w_id in self.notify_enabled_windows:
-            self.notify_enabled_windows.remove(w_id)
-            self.trigger_notification("Notifications Disabled", f"Notifications turned OFF for '{metadata['window_name']}'")
+        p_id = metadata["pane_id"]
+        if p_id in self.notify_enabled_windows:
+            self.notify_enabled_windows.remove(p_id)
+            self.trigger_notification("Notifications Disabled", f"Notifications turned OFF for pane '{metadata['pane_title']}'")
         else:
-            self.notify_enabled_windows.add(w_id)
-            self.trigger_notification("Notifications Enabled", f"Notifications turned ON for '{metadata['window_name']}'")
+            self.notify_enabled_windows.add(p_id)
+            self.trigger_notification("Notifications Enabled", f"Notifications turned ON for pane '{metadata['pane_title']}'")
         
         self.populate_table()
 
@@ -693,7 +708,7 @@ class TmuxSessionManagerApp(App):
             pass
         return ""
 
-    def get_window_status(self, raw_w_name: str, pane_title: str, cmd: str, pid: str = "") -> tuple[str, str]:
+    def get_pane_status(self, raw_w_name: str, pane_title: str, cmd: str, pid: str = "") -> tuple[str, str]:
         """Detect status from metadata. Returns (icon, color)."""
         w_name_lower = raw_w_name.lower()
         pane_title = pane_title.strip()
@@ -786,38 +801,41 @@ class TmuxSessionManagerApp(App):
         self.is_refreshing = True
 
         try:
-            # Use direct tmux call for speed and freshness
-            # Use tab as delimiter to avoid issues with pipes in titles/commands
-            # Format: window_id | window_name | pane_title | pane_current_command | session_id | session_name | window_index | pane_pid
+            # window_id | window_name | pane_id | pane_title | pane_current_command | session_id | session_name | window_index | pane_index | pane_pid
             res = subprocess.run(
-                ["tmux", "list-windows", "-a", "-F", "#{window_id}\t#{window_name}\t#{pane_title}\t#{pane_current_command}\t#{session_id}\t#{session_name}\t#{window_index}\t#{pane_pid}"],
+                ["tmux", "list-panes", "-a", "-F", "#{window_id}\t#{window_name}\t#{pane_id}\t#{pane_title}\t#{pane_current_command}\t#{session_id}\t#{session_name}\t#{window_index}\t#{pane_index}\t#{pane_pid}"],
                 capture_output=True, text=True, check=False
             )
 
             lines = res.stdout.strip().split("\n")
+            log_debug(f"Panes found: {len(lines)}")
             raw_data = []
             for line in lines:
                 if not line: continue
                 parts = line.split("\t")
-                if len(parts) >= 8:
+                if len(parts) >= 10:
                     raw_data.append({
                         "w_id": parts[0],
                         "w_name": parts[1],
-                        "p_title": parts[2],
-                        "p_cmd": parts[3],
-                        "s_id": parts[4],
-                        "s_name": parts[5],
-                        "w_index": parts[6],
-                        "p_pid": parts[7]
+                        "p_id": parts[2],
+                        "p_title": parts[3],
+                        "p_cmd": parts[4],
+                        "s_id": parts[5],
+                        "s_name": parts[6],
+                        "w_index": parts[7],
+                        "p_index": parts[8],
+                        "p_pid": parts[9]
                     })
 
-            # Sort by session name then window index
+            # Sort by session name then window index then pane index
             def get_sort_key(x):
                 try:
-                    idx = int(x["w_index"])
+                    w_idx = int(x["w_index"])
+                    p_idx = int(x["p_index"])
                 except (ValueError, TypeError):
-                    idx = 0
-                return (x["s_name"], idx)
+                    w_idx = 0
+                    p_idx = 0
+                return (x["s_name"], w_idx, p_idx)
 
             raw_data.sort(key=get_sort_key)
 
@@ -831,48 +849,53 @@ class TmuxSessionManagerApp(App):
                     pass
 
             new_metadata = {}
-            updated_window_ids = [] 
-            last_session_id = None
+            updated_pane_ids = [] 
             
             last_session_name = self.config.get("last_session_name")
             last_window_name = self.config.get("last_window_name")
             last_selected_id = None
 
-            for win in raw_data:
-                w_id = win["w_id"]
-                s_id = win["s_id"]
-                s_name = win["s_name"]
-                raw_w_name = win["w_name"]
+            for pane in raw_data:
+                w_id = pane["w_id"]
+                s_id = pane["s_id"]
+                p_id = pane["p_id"]
+                s_name = pane["s_name"]
+                raw_w_name = pane["w_name"]
                 
-                updated_window_ids.append(w_id)
-                display_session_name = escape(s_name) if s_id != last_session_id else ""
-                last_session_id = s_id
+                updated_pane_ids.append(p_id)
+                
+                # Full context on every row
+                display_session_name = escape(s_name)
+                display_window_name = escape(raw_w_name)
 
                 if self.first_load and s_name == last_session_name and raw_w_name == last_window_name:
-                    last_selected_id = w_id
+                    last_selected_id = p_id
 
-                status_icon, status_color = self.get_window_status(raw_w_name, win["p_title"], win["p_cmd"], win["p_pid"])
+                status_icon, status_color = self.get_pane_status(raw_w_name, pane["p_title"], pane["p_cmd"], pane["p_pid"])
                 
                 # Check for notification trigger
-                if w_id in self.notify_enabled_windows and not self.first_load:
-                    old_meta = self.row_metadata.get(w_id, {})
+                if p_id in self.notify_enabled_windows and not self.first_load:
+                    old_meta = self.row_metadata.get(p_id, {})
                     old_color = old_meta.get("status_color")
                     # Trigger if we transitioned from something else TO green (Ready)
                     if old_color and old_color != "green" and status_color == "green":
-                        self.trigger_notification("Tmux Task Finished", f"Window '{raw_w_name}' in session '{s_name}' is Ready!")
+                        self.trigger_notification("Tmux Task Finished", f"Pane '{pane['p_title']}' in window '{raw_w_name}' is Ready!")
                     # Trigger if we transitioned TO red (Feedback Required)
                     elif status_color == "red" and old_color != "red":
-                        self.trigger_notification("AI Feedback Required", f"Window '{raw_w_name}' in session '{s_name}' needs input!")
+                        self.trigger_notification("AI Feedback Required", f"Pane '{pane['p_title']}' in window '{raw_w_name}' needs input!")
 
-                new_metadata[w_id] = {
+                new_metadata[p_id] = {
                     "session_id": s_id,
                     "window_id": w_id,
+                    "pane_id": p_id,
                     "session_name": s_name,
                     "display_session_name": display_session_name,
                     "window_name": raw_w_name,
-                    "display_window_name": escape(raw_w_name),
+                    "display_window_name": display_window_name,
                     "status_icon": status_icon,
-                    "status_color": status_color
+                    "status_color": status_color,
+                    "pane_title": pane["p_title"],
+                    "display_pane_title": escape(pane["p_title"])
                 }
 
             if self.first_load:
@@ -880,52 +903,64 @@ class TmuxSessionManagerApp(App):
                     self.target_window_after_refresh = last_selected_id
                 self.first_load = False
 
-            # Detect new windows
+            # Detect new panes
             if self.row_metadata:
                 new_ids = set(new_metadata.keys()) - set(self.row_metadata.keys())
                 if new_ids and not hasattr(self, 'target_window_after_refresh'):
                     self.target_window_after_refresh = list(new_ids)[0]
+                    import time
+                    self.switch_cooldown_until = time.time() + 2.0
 
-            # Clear and repopulate if the set of windows or their order changed, or if forced
+            # Clear and repopulate if the set of panes or their order changed, or if forced
             current_keys = [str(k.value) for k in table.rows.keys()]
-            if current_keys != updated_window_ids or force_full:
+            if current_keys != updated_pane_ids or force_full:
                 table.clear()
-                for w_id in updated_window_ids:
-                    meta = new_metadata[w_id]
+                for p_id in updated_pane_ids:
+                    meta = new_metadata[p_id]
                     st_text = Text(meta["status_icon"], style=meta["status_color"]) if meta["status_icon"] else Text("")
-                    if w_id in self.notify_enabled_windows:
+                    if p_id in self.notify_enabled_windows:
                         st_text.append("🔔", style="white")
                     
-                    if self.session_first:
-                        table.add_row(st_text, meta["display_session_name"], meta["display_window_name"], key=w_id)
+                    if self.view_mode == 0:
+                        table.add_row(st_text, meta["display_session_name"], meta["display_window_name"], meta["display_pane_title"], key=p_id)
+                    elif self.view_mode == 1:
+                        table.add_row(st_text, meta["display_window_name"], meta["display_pane_title"], meta["display_session_name"], key=p_id)
                     else:
-                        table.add_row(st_text, meta["display_window_name"], meta["display_session_name"], key=w_id)
+                        table.add_row(st_text, meta["display_pane_title"], meta["display_session_name"], meta["display_window_name"], key=p_id)
             else:
                 # Just update cells if the order is the same
                 column_keys = list(table.columns.keys())
-                for w_id in updated_window_ids:
-                    meta = new_metadata[w_id]
-                    old_meta = self.row_metadata.get(w_id, {})
+                for p_id in updated_pane_ids:
+                    meta = new_metadata[p_id]
+                    old_meta = self.row_metadata.get(p_id, {})
                     
-                    notify_changed = (w_id in self.notify_enabled_windows) != (w_id in getattr(self, "old_notify_enabled_windows", set()))
+                    notify_changed = (p_id in self.notify_enabled_windows) != (p_id in getattr(self, "old_notify_enabled_windows", set()))
                     
                     if (old_meta.get("display_session_name") != meta["display_session_name"] or 
                         old_meta.get("display_window_name") != meta["display_window_name"] or
+                        old_meta.get("display_pane_title") != meta["display_pane_title"] or
                         old_meta.get("status_icon") != meta["status_icon"] or
                         old_meta.get("status_color") != meta["status_color"] or
                         notify_changed):
                         
                         st_text = Text(meta["status_icon"], style=meta["status_color"]) if meta["status_icon"] else Text("")
-                        if w_id in self.notify_enabled_windows:
+                        if p_id in self.notify_enabled_windows:
                             st_text.append("🔔", style="white")
                         
-                        table.update_cell(w_id, column_keys[0], st_text)
-                        if self.session_first:
-                            table.update_cell(w_id, column_keys[1], meta["display_session_name"])
-                            table.update_cell(w_id, column_keys[2], meta["display_window_name"])
+                        table.update_cell(p_id, column_keys[0], st_text)
+                        if self.view_mode == 0:
+                            table.update_cell(p_id, column_keys[1], meta["display_session_name"])
+                            table.update_cell(p_id, column_keys[2], meta["display_window_name"])
+                            table.update_cell(p_id, column_keys[3], meta["display_pane_title"])
+                        elif self.view_mode == 1:
+                            table.update_cell(p_id, column_keys[1], meta["display_window_name"])
+                            table.update_cell(p_id, column_keys[2], meta["display_pane_title"])
+                            table.update_cell(p_id, column_keys[3], meta["display_session_name"])
                         else:
-                            table.update_cell(w_id, column_keys[1], meta["display_window_name"])
-                            table.update_cell(w_id, column_keys[2], meta["display_session_name"])
+                            table.update_cell(p_id, column_keys[1], meta["display_pane_title"])
+                            table.update_cell(p_id, column_keys[2], meta["display_session_name"])
+                            table.update_cell(p_id, column_keys[3], meta["display_window_name"])
+
 
             self.old_notify_enabled_windows = set(self.notify_enabled_windows)
             self.row_metadata = new_metadata
@@ -951,19 +986,21 @@ class TmuxSessionManagerApp(App):
                 if new_row_count > 0:
                     new_index = min(current_row_index, new_row_count - 1)
                     table.move_cursor(row=new_index, column=current_col_index)
-            elif updated_window_ids:
+            elif updated_pane_ids:
                 table.move_cursor(row=0, column=current_col_index)
 
         except Exception as e:
-            self.title = f"Tmux Session Manager (Error: {e})"
+            self.title = f"ERR: {e}"
+            log_debug(f"Populate Error: {e}")
         finally:
             self.is_refreshing = False
-            if table is not None and table.cursor_row is not None:
+            import time
+            if table is not None and table.cursor_row is not None and time.time() > self.switch_cooldown_until:
                 try:
                     row_key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
                     metadata = self.row_metadata.get(row_key.value)
                     if metadata:
-                        target = metadata["window_id"]
+                        target = metadata["pane_id"]
                         if target != self.last_switched_target:
                             self.switch_tmux_target(target)
                             self.last_switched_target = target
@@ -976,15 +1013,21 @@ class TmuxSessionManagerApp(App):
         if self.is_refreshing or event.cell_key.row_key is None:
             return
 
+        import time
+        if time.time() < self.switch_cooldown_until:
+            return
+
         metadata = self.row_metadata.get(event.cell_key.row_key.value)
         if not metadata:
             return
 
         session_id = metadata["session_id"]
         window_id = metadata["window_id"]
+        pane_id = metadata["pane_id"]
         self.session_last_window[session_id] = window_id
+        self.window_last_pane[window_id] = pane_id
 
-        target = window_id
+        target = pane_id
         if target and target != self.last_switched_target:
             self.switch_tmux_target(target)
             self.last_switched_target = target
