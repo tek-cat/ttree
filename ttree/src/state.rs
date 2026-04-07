@@ -110,20 +110,17 @@ pub struct Window {
     pub expanded: bool,
 }
 
-#[derive(Debug, Clone)]
-pub struct PanePreview {
-    pub id: PaneId,
-    pub region: Rect,
-    pub content: String,
-    pub active: bool,
+#[derive(Clone)]
+pub struct EmbeddedTerminal {
+    pub parser: std::sync::Arc<std::sync::RwLock<vt100::Parser>>,
+    pub pty_writer: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
+    pub target_id: String,
 }
 
-#[derive(Debug, Clone)]
-pub struct WindowPreview {
-    pub window_id: WindowId,
-    pub width: u16,
-    pub height: u16,
-    pub panes: Vec<PanePreview>,
+impl std::fmt::Debug for EmbeddedTerminal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EmbeddedTerminal").field("target_id", &self.target_id).finish()
+    }
 }
 
 #[derive(Debug, Clone)]

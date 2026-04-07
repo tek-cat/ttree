@@ -5,14 +5,13 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
-use std::{io, time::Duration};
-use std::os::unix::process::CommandExt;
+use std::{io, time::Duration, sync::{Arc, RwLock}};
 
 mod state;
 mod tmux_client;
 mod ui;
 
-use crate::state::AppState;
+use crate::state::{AppState, Panel, EmbeddedTerminal};
 use crate::tmux_client::Tmux;
 
 fn setup_panic_hook() {
@@ -26,15 +25,12 @@ fn setup_panic_hook() {
 }
 
 async fn sync_state(state: &mut AppState) -> Result<bool> {
-    // 1. Fetch data from tmux
     let sessions_raw = Tmux::list_sessions().await.unwrap_or_default();
     let windows_raw = Tmux::list_windows().await.unwrap_or_default();
     let panes_raw = Tmux::list_panes().await.unwrap_or_default();
 
-    // Store old IDs to check for changes
     let old_panes: std::collections::HashSet<String> = state.panes.keys().cloned().collect();
 
-    // 2. Clear old state but preserve expansion/selection
     let expanded_sessions: std::collections::HashSet<String> = state.sessions.iter()
         .filter(|(_, s)| s.expanded)
         .map(|(id, _)| id.clone())
@@ -48,7 +44,6 @@ async fn sync_state(state: &mut AppState) -> Result<bool> {
     state.windows.clear();
     state.panes.clear();
 
-    // 3. Populate sessions
     for s in sessions_raw {
         let parts: Vec<&str> = s.split('\u{001f}').collect();
         if parts.len() >= 2 {
@@ -62,7 +57,6 @@ async fn sync_state(state: &mut AppState) -> Result<bool> {
         }
     }
 
-    // 4. Populate windows
     for w in windows_raw {
         let parts: Vec<&str> = w.split('\u{001f}').collect();
         if parts.len() >= 6 {
@@ -84,7 +78,6 @@ async fn sync_state(state: &mut AppState) -> Result<bool> {
         }
     }
 
-    // 5. Populate panes
     for p in panes_raw {
         let parts: Vec<&str> = p.split('\u{001f}').collect();
         if parts.len() >= 9 {
@@ -112,7 +105,6 @@ async fn sync_state(state: &mut AppState) -> Result<bool> {
     let new_panes: std::collections::HashSet<String> = state.panes.keys().cloned().collect();
     let changed = old_panes != new_panes;
 
-    // Auto-select first session if focus is empty
     if !state.sessions.is_empty() && state.focus.selected_id.is_none() {
         if let Some(first) = state.sessions.keys().next() {
             state.focus.selected_id = Some(first.clone());
@@ -125,117 +117,142 @@ async fn sync_state(state: &mut AppState) -> Result<bool> {
 #[tokio::main]
 async fn main() -> Result<()> {
     setup_panic_hook();
-    
-    let mut state = AppState::default();
-    let mut last_error: Option<String> = None;
 
     loop {
-        // Setup terminal
-        enable_raw_mode()?;
-        let mut stdout = io::stdout();
-        execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
-        let backend = CrosstermBackend::new(stdout);
-        let mut terminal = Terminal::new(backend)?;
-        
-        if let Err(e) = sync_state(&mut state).await {
-            last_error = Some(format!("Failed to sync tmux state: {}", e));
+        match run_app().await {
+            Ok(()) => {}
+            Err(e) => {
+                eprintln!("Error: {}", e);
+            }
+        }
+    }
+}
+
+async fn run_app() -> Result<()> {
+    let mut state = AppState::default();
+    let last_error: Option<String> = None;
+    let mut active_terminal: Option<EmbeddedTerminal> = None;
+    let mut pty_task: Option<tokio::task::JoinHandle<()>> = None;
+    let mut last_selected_id: Option<String> = None;
+
+    enable_raw_mode()?;
+    let mut stdout = io::stdout();
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend)?;
+
+    let mut last_sync_update = tokio::time::Instant::now();
+    let mut action_attach = None;
+
+    loop {
+        if last_sync_update.elapsed() > Duration::from_secs(2) {
+            let _ = sync_state(&mut state).await;
+            last_sync_update = tokio::time::Instant::now();
         }
 
-        // Attempt to get preview for initially selected pane/window
-        let mut last_preview_update = tokio::time::Instant::now() - Duration::from_secs(1);
-        let mut last_sync_update = tokio::time::Instant::now();
-        let mut preview_data: Option<crate::state::WindowPreview> = None;
-        
-        let mut action_attach = None;
-
-        // Main Loop
-        loop {
-            // Periodic sync
-            if last_sync_update.elapsed() > Duration::from_secs(2) {
-                if let Ok(changed) = sync_state(&mut state).await {
-                    if changed {
-                        last_preview_update = tokio::time::Instant::now() - Duration::from_secs(1);
-                    }
-                }
-                last_sync_update = tokio::time::Instant::now();
+        if state.focus.selected_id != last_selected_id {
+            if let Some(task) = pty_task.take() {
+                task.abort();
             }
+            active_terminal = None;
 
-            // Fetch preview
-            if last_preview_update.elapsed() > Duration::from_millis(500) {
-                let mut target_window_id = None;
+            if let Some(target_id) = &state.focus.selected_id {
+                let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+                let parser = Arc::new(RwLock::new(vt100::Parser::new(24, 80, 0)));
                 
-                if let Some(sel) = &state.focus.selected_id {
-                    if state.sessions.contains_key(sel) {
-                        if let Some(s) = state.sessions.get(sel) {
-                            for w_id in &s.windows {
-                                if let Some(w) = state.windows.get(w_id) {
-                                    if w.active {
-                                        target_window_id = Some(w_id.clone());
-                                        break;
+                active_terminal = Some(EmbeddedTerminal {
+                    parser: parser.clone(),
+                    pty_writer: tx,
+                    target_id: target_id.clone(),
+                });
+
+                let target_id_clone = target_id.clone();
+                let handle = tokio::spawn(async move {
+                    use portable_pty::{CommandBuilder, native_pty_system, PtySize};
+                    let pty_system = native_pty_system();
+                    let pair = match pty_system.openpty(PtySize {
+                        rows: 24,
+                        cols: 80,
+                        pixel_width: 0,
+                        pixel_height: 0,
+                    }) {
+                        Ok(p) => p,
+                        Err(_) => return,
+                    };
+
+                    let mut cmd = CommandBuilder::new("tmux");
+                    cmd.args(["attach", "-t", &target_id_clone]);
+                    
+                    let mut child = match pair.slave.spawn_command(cmd) {
+                        Ok(c) => c,
+                        Err(_) => return,
+                    };
+                    drop(pair.slave);
+
+                    let mut reader = pair.master.try_clone_reader().unwrap();
+                    let mut writer = pair.master.take_writer().unwrap();
+                    let mut receiver = rx;
+
+                    let parser_clone = parser.clone();
+                    let reader_task = tokio::task::spawn_blocking(move || {
+                        let mut buf = [0u8; 4096];
+                        loop {
+                            match std::io::Read::read(&mut reader, &mut buf) {
+                                Ok(n) if n > 0 => {
+                                    if let Ok(mut p) = parser_clone.write() {
+                                        p.process(&buf[..n]);
                                     }
                                 }
-                            }
-                            if target_window_id.is_none() {
-                                target_window_id = s.windows.first().cloned();
+                                _ => break,
                             }
                         }
-                    } else if state.windows.contains_key(sel) {
-                        target_window_id = Some(sel.clone());
-                    } else if state.panes.contains_key(sel) {
-                        if let Some(p) = state.panes.get(sel) {
-                            target_window_id = Some(p.window_id.clone());
-                        }
-                    }
-                }
-// ... rest of preview fetching remains the same ...
+                    });
 
-                if let Some(w_id) = target_window_id {
-                    if let Some(window) = state.windows.get(&w_id) {
-                        let win_width = window.width;
-                        let win_height = window.height;
-                        
-                        let mut set = tokio::task::JoinSet::new();
-                        for p_id in &window.panes {
-                            if let Some(pane) = state.panes.get(p_id) {
-                                let p_id_clone = p_id.clone();
-                                let region = pane.region.clone();
-                                let active = pane.active;
-                                set.spawn(async move {
-                                    let content = Tmux::capture_pane(&p_id_clone).await.unwrap_or_default();
-                                    crate::state::PanePreview {
-                                        id: p_id_clone,
-                                        region: region.unwrap_or_default(),
-                                        content,
-                                        active,
-                                    }
-                                });
+                    let writer_task = tokio::task::spawn_blocking(move || {
+                        while let Some(data) = receiver.blocking_recv() {
+                            if std::io::Write::write_all(&mut writer, &data).is_err() {
+                                break;
                             }
                         }
-                        
-                        let mut panes = Vec::new();
-                        while let Some(res) = set.join_next().await {
-                            if let Ok(pane_preview) = res {
-                                panes.push(pane_preview);
-                            }
-                        }
+                    });
 
-                        preview_data = Some(crate::state::WindowPreview {
-                            window_id: w_id.clone(),
-                            width: win_width,
-                            height: win_height,
-                            panes,
-                        });
-                    }
-                }
-                last_preview_update = tokio::time::Instant::now();
+                    let _ = tokio::task::spawn_blocking(move || child.wait()).await;
+                    reader_task.abort();
+                    writer_task.abort();
+                });
+                pty_task = Some(handle);
             }
+            last_selected_id = state.focus.selected_id.clone();
+        }
 
-            terminal.draw(|f| {
-                ui::render(f, &state, &preview_data, &last_error);
-            })?;
+        // Clean up pty_task if it finished
+        let task_finished = if let Some(task) = &pty_task {
+            task.is_finished()
+        } else {
+            false
+        };
+        if task_finished {
+            pty_task = None;
+            active_terminal = None;
+            // Switch back to Tree panel if the terminal exits
+            state.focus.panel = Panel::Tree;
+        }
 
-            if event::poll(Duration::from_millis(50))? {
-                if let Event::Key(key) = event::read()? {
+        terminal.draw(|f| {
+            ui::render(f, &state, &active_terminal, &last_error);
+        })?;
+
+        if event::poll(Duration::from_millis(50))? {
+            if let Event::Key(key) = event::read()? {
+                if key.code == KeyCode::Char('p') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                    state.focus.panel = match state.focus.panel {
+                        Panel::Tree => Panel::Preview,
+                        Panel::Preview => Panel::Tree,
+                    };
+                    continue;
+                }
+
+                if state.focus.panel == Panel::Tree {
                     if state.show_help {
                         match key.code {
                             KeyCode::Char('q') | KeyCode::Esc | KeyCode::Enter | KeyCode::Char('?') => {
@@ -247,13 +264,28 @@ async fn main() -> Result<()> {
                     }
 
                     match key.code {
-                        KeyCode::Char('q') => break,
-                        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
+                        KeyCode::Char('q') => {
+                            disable_raw_mode()?;
+                            execute!(
+                                io::stdout(),
+                                LeaveAlternateScreen,
+                                DisableMouseCapture
+                            )?;
+                            std::process::exit(0);
+                        }
+                        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            disable_raw_mode()?;
+                            execute!(
+                                io::stdout(),
+                                LeaveAlternateScreen,
+                                DisableMouseCapture
+                            )?;
+                            std::process::exit(0);
+                        }
                         KeyCode::Char('?') => {
                             state.show_help = true;
                         }
                         KeyCode::Enter => {
-
                             if let Some(sel) = &state.focus.selected_id {
                                 action_attach = Some(sel.clone());
                                 break;
@@ -261,51 +293,103 @@ async fn main() -> Result<()> {
                         }
                         KeyCode::Up | KeyCode::Char('k') => {
                             state.move_selection_up();
-                            last_preview_update = tokio::time::Instant::now() - Duration::from_secs(1); // Force immediate preview update
                         }
                         KeyCode::Down | KeyCode::Char('j') => {
                             state.move_selection_down();
-                            last_preview_update = tokio::time::Instant::now() - Duration::from_secs(1);
                         }
                         KeyCode::Char(' ') => {
                             state.toggle_expansion();
                         }
                         _ => {}
                     }
+                } else if state.focus.panel == Panel::Preview {
+                    if let Some(term) = &active_terminal {
+                        let mut bytes = Vec::new();
+                        match key.code {
+                            KeyCode::Char(c) => {
+                                if key.modifiers.contains(KeyModifiers::CONTROL) {
+                                    if c >= 'a' && c <= 'z' {
+                                        bytes.push(c as u8 - b'a' + 1);
+                                    } else if (b'@'..=b'_').contains(&(c as u8)) {
+                                        bytes.push(c as u8 - b'@');
+                                    } else if c == ' ' {
+                                        bytes.push(0);
+                                    }
+                                } else if key.modifiers.contains(KeyModifiers::ALT) {
+                                    bytes.push(27);
+                                    bytes.extend_from_slice(c.to_string().as_bytes());
+                                } else {
+                                    bytes.extend_from_slice(c.to_string().as_bytes());
+                                }
+                            }
+                            KeyCode::Enter => bytes.push(b'\r'),
+                            KeyCode::Esc => bytes.push(27),
+                            KeyCode::Backspace => bytes.push(127),
+                            KeyCode::Tab => bytes.push(b'\t'),
+                            KeyCode::Up => bytes.extend_from_slice(b"\x1b[A"),
+                            KeyCode::Down => bytes.extend_from_slice(b"\x1b[B"),
+                            KeyCode::Right => bytes.extend_from_slice(b"\x1b[C"),
+                            KeyCode::Left => bytes.extend_from_slice(b"\x1b[D"),
+                            KeyCode::Home => bytes.extend_from_slice(b"\x1b[H"),
+                            KeyCode::End => bytes.extend_from_slice(b"\x1b[F"),
+                            KeyCode::PageUp => bytes.extend_from_slice(b"\x1b[5~"),
+                            KeyCode::PageDown => bytes.extend_from_slice(b"\x1b[6~"),
+                            KeyCode::Delete => bytes.extend_from_slice(b"\x1b[3~"),
+                            KeyCode::F(n) => {
+                                let s = match n {
+                                    1 => "\x1bOP",
+                                    2 => "\x1bOQ",
+                                    3 => "\x1bOR",
+                                    4 => "\x1bOS",
+                                    5 => "\x1b[15~",
+                                    6 => "\x1b[17~",
+                                    7 => "\x1b[18~",
+                                    8 => "\x1b[19~",
+                                    9 => "\x1b[20~",
+                                    10 => "\x1b[21~",
+                                    11 => "\x1b[23~",
+                                    12 => "\x1b[24~",
+                                    _ => "",
+                                };
+                                bytes.extend_from_slice(s.as_bytes());
+                            }
+                            _ => {}
+                        }
+                        if !bytes.is_empty() {
+                            let _ = term.pty_writer.send(bytes);
+                        }
+                    }
                 }
             }
         }
+    }
 
-        // Restore terminal
-        disable_raw_mode()?;
-        execute!(
-            terminal.backend_mut(),
-            LeaveAlternateScreen,
-            DisableMouseCapture
-        )?;
-        terminal.show_cursor()?;
+    if let Some(task) = pty_task {
+        task.abort();
+    }
 
-        // Perform attach action outside of raw mode
-        if let Some(target) = action_attach {
-            // Identify target type. tmux attach-session -t takes session ID.
-            let mut session_target = target.clone();
-            if state.windows.contains_key(&target) {
-                session_target = state.windows.get(&target).unwrap().session_id.clone();
-            } else if state.panes.contains_key(&target) {
-                let win_id = &state.panes.get(&target).unwrap().window_id;
-                session_target = state.windows.get(win_id).unwrap().session_id.clone();
-            }
-            
-            // Wait for the attach process to exit before continuing the loop
-            let mut child = tokio::process::Command::new("tmux")
-                .args(["attach-session", "-t", &session_target])
-                .spawn()?;
-                
-            let _ = child.wait().await;
-        } else {
-            // User pressed q or Ctrl-C, exit the application entirely
-            break;
+    disable_raw_mode()?;
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableMouseCapture
+    )?;
+    terminal.show_cursor()?;
+
+    if let Some(target) = action_attach {
+        let mut session_target = target.clone();
+        if state.windows.contains_key(&target) {
+            session_target = state.windows.get(&target).unwrap().session_id.clone();
+        } else if state.panes.contains_key(&target) {
+            let win_id = &state.panes.get(&target).unwrap().window_id;
+            session_target = state.windows.get(win_id).unwrap().session_id.clone();
         }
+        
+        let mut child = tokio::process::Command::new("tmux")
+            .args(["attach-session", "-t", &session_target])
+            .spawn()?;
+            
+        let _ = child.wait().await;
     }
 
     Ok(())

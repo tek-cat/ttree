@@ -25,7 +25,7 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
     .split(popup_layout[1])[1]
 }
 
-pub fn render(frame: &mut Frame, state: &AppState, preview_data: &Option<crate::state::WindowPreview>, last_error: &Option<String>) {
+pub fn render(frame: &mut Frame, state: &AppState, preview_data: &Option<crate::state::EmbeddedTerminal>, last_error: &Option<String>) {
     let chunks = Layout::vertical([
         Constraint::Length(1),
         Constraint::Fill(1),
@@ -70,48 +70,10 @@ pub fn render(frame: &mut Frame, state: &AppState, preview_data: &Option<crate::
     let preview_area = preview_block.inner(body_chunks[1]);
     frame.render_widget(preview_block, body_chunks[1]);
 
-    if let Some(preview) = preview_data {
-        let win_w = preview.width.max(1) as f32;
-        let win_h = preview.height.max(1) as f32;
-        let area_w = preview_area.width as f32;
-        let area_h = preview_area.height as f32;
-        
-        for pane in &preview.panes {
-            let px = (pane.region.x as f32 / win_w * area_w).round() as u16;
-            let py = (pane.region.y as f32 / win_h * area_h).round() as u16;
-            let mut pw = (pane.region.width as f32 / win_w * area_w).round() as u16;
-            let mut ph = (pane.region.height as f32 / win_h * area_h).round() as u16;
-
-            let x = preview_area.x + px;
-            let y = preview_area.y + py;
-            
-            // Constrain bounds to prevent overflow
-            if x >= preview_area.right() || y >= preview_area.bottom() { continue; }
-            if x + pw > preview_area.right() { pw = preview_area.right().saturating_sub(x); }
-            if y + ph > preview_area.bottom() { ph = preview_area.bottom().saturating_sub(y); }
-
-            if pw > 0 && ph > 0 {
-                let pane_rect = Rect::new(x, y, pw, ph);
-                
-                let is_selected = Some(&pane.id) == state.focus.selected_id.as_ref();
-                let border_color = if is_selected {
-                    Color::Yellow
-                } else if pane.active {
-                    Color::Green
-                } else {
-                    Color::DarkGray
-                };
-
-                let pane_block = Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(border_color));
-                
-                let pane_inner = pane_block.inner(pane_rect);
-                frame.render_widget(pane_block, pane_rect);
-                
-                let p = Paragraph::new(pane.content.as_str());
-                frame.render_widget(p, pane_inner);
-            }
+    if let Some(terminal) = preview_data {
+        if let Ok(parser) = terminal.parser.read() {
+            let pseudo_term = tui_term::widget::PseudoTerminal::new(parser.screen());
+            frame.render_widget(pseudo_term, preview_area);
         }
     }
 
