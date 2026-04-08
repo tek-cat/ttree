@@ -105,6 +105,17 @@ async fn sync_state(state: &mut AppState) -> Result<bool> {
     let new_panes: std::collections::HashSet<String> = state.panes.keys().cloned().collect();
     let changed = old_panes != new_panes;
 
+    if let Some(sel) = &state.focus.selected_id {
+        if !state.sessions.contains_key(sel) 
+            && !state.windows.contains_key(sel) 
+            && !state.panes.contains_key(sel) {
+            state.focus.selected_id = None;
+            if let Some(first) = state.sessions.keys().next() {
+                state.focus.selected_id = Some(first.clone());
+            }
+        }
+    }
+
     if !state.sessions.is_empty() && state.focus.selected_id.is_none() {
         if let Some(first) = state.sessions.keys().next() {
             state.focus.selected_id = Some(first.clone());
@@ -144,6 +155,8 @@ async fn run_app() -> Result<()> {
     let mut last_sync_update = tokio::time::Instant::now();
     let mut action_attach = None;
 
+    let _ = sync_state(&mut state).await;
+
     loop {
         if last_sync_update.elapsed() > Duration::from_secs(2) {
             let _ = sync_state(&mut state).await;
@@ -181,7 +194,11 @@ async fn run_app() -> Result<()> {
                     };
 
                     let mut cmd = CommandBuilder::new("tmux");
-                    cmd.args(["attach", "-t", &target_id_clone]);
+                    if target_id_clone.starts_with('%') {
+                        cmd.args(["select-pane", "-t", &target_id_clone, ";", "attach-session", "-t", &target_id_clone]);
+                    } else {
+                        cmd.args(["attach", "-t", &target_id_clone]);
+                    }
                     
                     let mut child = match pair.slave.spawn_command(cmd) {
                         Ok(c) => c,
@@ -378,6 +395,8 @@ async fn run_app() -> Result<()> {
 
     if let Some(target) = action_attach {
         let mut session_target = target.clone();
+        let use_pane = target.starts_with('%');
+        
         if state.windows.contains_key(&target) {
             session_target = state.windows.get(&target).unwrap().session_id.clone();
         } else if state.panes.contains_key(&target) {
@@ -385,11 +404,17 @@ async fn run_app() -> Result<()> {
             session_target = state.windows.get(win_id).unwrap().session_id.clone();
         }
         
-        let mut child = tokio::process::Command::new("tmux")
-            .args(["attach-session", "-t", &session_target])
-            .spawn()?;
-            
-        let _ = child.wait().await;
+        if use_pane {
+            let mut child = tokio::process::Command::new("tmux")
+                .args(["select-pane", "-t", &target, ";", "attach-session", "-t", &session_target])
+                .spawn()?;
+            let _ = child.wait().await;
+        } else {
+            let mut child = tokio::process::Command::new("tmux")
+                .args(["attach-session", "-t", &session_target])
+                .spawn()?;
+            let _ = child.wait().await;
+        }
     }
 
     Ok(())
