@@ -6,6 +6,7 @@ use crossterm::{
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
 use std::{io, time::Duration, sync::{Arc, RwLock}};
+use portable_pty::{CommandBuilder, native_pty_system, PtySize};
 
 mod state;
 mod tmux_client;
@@ -151,7 +152,6 @@ async fn run_app() -> Result<()> {
     let mut active_terminal: Option<EmbeddedTerminal> = None;
     let mut pty_task: Option<tokio::task::JoinHandle<()>> = None;
     let mut last_selected_id: Option<String> = None;
-    let mut initial_sync = true;
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -163,96 +163,145 @@ async fn run_app() -> Result<()> {
     let mut action_attach: Option<String> = None;
 
     let _ = sync_state(&mut state).await;
-    initial_sync = false;
-    last_selected_id = state.focus.selected_id.clone();
 
+    let mut last_terminal_size = terminal.size().unwrap_or(ratatui::layout::Size::new(80, 24));
     loop {
         if tokio::time::Instant::now() > last_sync_update + Duration::from_millis(200) {
             let _ = sync_state(&mut state).await;
             last_sync_update = tokio::time::Instant::now();
         }
 
-        if event::poll(Duration::from_millis(50))? {
-            let Event::Key(key) = event::read()? else { continue };
+        let current_size = terminal.size().unwrap_or(last_terminal_size);
+        if current_size != last_terminal_size {
+            if let Some(term) = &mut active_terminal {
+                let sidebar_width = (current_size.width as f32 * 0.28) as u16;
+                let cols = current_size.width.saturating_sub(sidebar_width).saturating_sub(2);
+                let rows = current_size.height.saturating_sub(4);
+                
+                if let Ok(master) = term.pty_master.lock() {
+                    let _ = master.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
+                }
+            }
+            last_terminal_size = current_size;
         }
 
-        if state.focus.selected_id != last_selected_id && !initial_sync {
-            if let Some(task) = pty_task.take() {
-                task.abort();
-            }
-            active_terminal = None;
-
+        if state.focus.selected_id != last_selected_id {
             state.focus.enable_scrolling = true;
 
             if let Some(target_id) = &state.focus.selected_id {
-                let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-                let parser = Arc::new(RwLock::new(vt100::Parser::new(24, 80, 0)));
-                
-                active_terminal = Some(EmbeddedTerminal {
-                    parser: parser.clone(),
-                    pty_writer: tx,
-                    target_id: target_id.clone(),
-                });
-
-                let target_id_clone = target_id.clone();
-                let handle = tokio::spawn(async move {
-                    use portable_pty::{CommandBuilder, native_pty_system, PtySize};
-                    let pty_system = native_pty_system();
-                    let pair = match pty_system.openpty(PtySize {
-                        rows: 24,
-                        cols: 80,
-                        pixel_width: 0,
-                        pixel_height: 0,
-                    }) {
-                        Ok(p) => p,
-                        Err(_) => return,
-                    };
-
-                    let mut cmd = CommandBuilder::new("tmux");
-                    if target_id_clone.starts_with('%') {
-                        cmd.args(["select-pane", "-t", &target_id_clone, ";", "attach-session", "-t", &target_id_clone]);
-                    } else {
-                        cmd.args(["attach", "-t", &target_id_clone]);
-                    }
+                if let Some(term) = &mut active_terminal {
+                    let target_id_clone = target_id.clone();
+                    term.target_id = target_id.clone();
                     
-                    let mut child = match pair.slave.spawn_command(cmd) {
-                        Ok(c) => c,
-                        Err(_) => return,
-                    };
-                    drop(pair.slave);
-
-                    let mut reader = pair.master.try_clone_reader().unwrap();
-                    let mut writer = pair.master.take_writer().unwrap();
-                    let mut receiver = rx;
-
-                    let parser_clone = parser.clone();
-                    let reader_task = tokio::task::spawn_blocking(move || {
-                        let mut buf = [0u8; 4096];
-                        loop {
-                            match std::io::Read::read(&mut reader, &mut buf) {
-                                Ok(n) if n > 0 => {
-                                    if let Ok(mut p) = parser_clone.write() {
-                                        p.process(&buf[..n]);
+                    if let Some(pid) = term.pty_pid {
+                        tokio::spawn(async move {
+                            if let Ok(output) = tokio::process::Command::new("tmux")
+                                .args(["list-clients", "-F", "#{client_pid} #{client_tty}"])
+                                .output()
+                                .await
+                            {
+                                let stdout = String::from_utf8_lossy(&output.stdout);
+                                let mut client_tty = None;
+                                for line in stdout.lines() {
+                                    let parts: Vec<&str> = line.split_whitespace().collect();
+                                    if parts.len() == 2 && parts[0] == pid.to_string() {
+                                        client_tty = Some(parts[1].to_string());
+                                        break;
                                     }
                                 }
-                                _ => break,
+                                
+                                if let Some(tty) = client_tty {
+                                    let mut cmd = tokio::process::Command::new("tmux");
+                                    if target_id_clone.starts_with('%') {
+                                        cmd.args(["select-pane", "-t", &target_id_clone, ";"]);
+                                    }
+                                    cmd.args(["switch-client", "-c", &tty, "-t", &target_id_clone]);
+                                    let _ = cmd.output().await;
+                                }
                             }
-                        }
-                    });
+                        });
+                    }
+                } else {
+                    let size = terminal.size().unwrap_or(ratatui::layout::Size::new(80, 24));
+                    let sidebar_width = (size.width as f32 * 0.28) as u16;
+                    let cols = size.width.saturating_sub(sidebar_width).saturating_sub(2);
+                    let rows = size.height.saturating_sub(4);
 
-                    let writer_task = tokio::task::spawn_blocking(move || {
-                        while let Some(data) = receiver.blocking_recv() {
-                            if std::io::Write::write_all(&mut writer, &data).is_err() {
-                                break;
-                            }
+                    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+                    let parser = Arc::new(RwLock::new(vt100::Parser::new(rows, cols, 0)));
+                    
+                    let pty_system = native_pty_system();
+                    if let Ok(pair) = pty_system.openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 }) {
+                        let mut cmd = CommandBuilder::new("tmux");
+                        let target_id_clone = target_id.clone();
+                        if target_id_clone.starts_with('%') {
+                            cmd.args(["select-pane", "-t", &target_id_clone, ";", "attach-session", "-t", &target_id_clone]);
+                        } else {
+                            cmd.args(["attach", "-t", &target_id_clone]);
                         }
-                    });
+                        
+                        if let Ok(mut child) = pair.slave.spawn_command(cmd) {
+                            let pid = child.process_id();
+                            drop(pair.slave);
+                            
+                            let mut reader = pair.master.try_clone_reader().unwrap();
+                            let mut writer = pair.master.take_writer().unwrap();
 
-                    let _ = tokio::task::spawn_blocking(move || child.wait()).await;
-                    reader_task.abort();
-                    writer_task.abort();
-                });
-                pty_task = Some(handle);
+                            active_terminal = Some(EmbeddedTerminal {
+                                parser: parser.clone(),
+                                pty_writer: tx,
+                                target_id: target_id.clone(),
+                                pty_pid: pid,
+                                pty_master: std::sync::Arc::new(std::sync::Mutex::new(pair.master)),
+                            });
+                            let mut receiver = rx;
+                            let parser_clone = parser.clone();
+
+                            let reader_task = tokio::task::spawn_blocking(move || {
+                                let mut buf = [0u8; 4096];
+                                loop {
+                                    match std::io::Read::read(&mut reader, &mut buf) {
+                                        Ok(n) if n > 0 => {
+                                            if let Ok(mut p) = parser_clone.write() {
+                                                p.process(&buf[..n]);
+                                            }
+                                        }
+                                        _ => break,
+                                    }
+                                }
+                            });
+
+                            let writer_task = tokio::task::spawn_blocking(move || {
+                                while let Some(data) = receiver.blocking_recv() {
+                                    if std::io::Write::write_all(&mut writer, &data).is_err() {
+                                        break;
+                                    }
+                                }
+                            });
+
+                            let child_arc = std::sync::Arc::new(std::sync::Mutex::new(child));
+                            let handle = tokio::spawn(async move {
+                                loop {
+                                    let status = {
+                                        if let Ok(mut c) = child_arc.lock() {
+                                            c.try_wait()
+                                        } else {
+                                            break;
+                                        }
+                                    };
+                                    match status {
+                                        Ok(Some(_)) => break,
+                                        Ok(None) => tokio::time::sleep(std::time::Duration::from_millis(100)).await,
+                                        Err(_) => break,
+                                    }
+                                }
+                                reader_task.abort();
+                                writer_task.abort();
+                            });
+                            pty_task = Some(handle);
+                        }
+                    }
+                }
             }
             last_selected_id = state.focus.selected_id.clone();
         }

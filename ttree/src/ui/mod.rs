@@ -65,7 +65,7 @@ pub fn render(frame: &mut Frame, state: &AppState, preview_data: &Option<crate::
 
     // Preview / Relay Region
     let preview_block = Block::default()
-        .title(" Preview ")
+        .title(" Terminal ")
         .borders(Borders::ALL);
     let preview_area = preview_block.inner(body_chunks[1]);
     frame.render_widget(preview_block, body_chunks[1]);

@@ -119,6 +119,8 @@ pub struct EmbeddedTerminal {
     pub parser: std::sync::Arc<std::sync::RwLock<vt100::Parser>>,
     pub pty_writer: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
     pub target_id: String,
+    pub pty_pid: Option<u32>,
+    pub pty_master: std::sync::Arc<std::sync::Mutex<Box<dyn portable_pty::MasterPty + Send>>>,
 }
 
 impl std::fmt::Debug for EmbeddedTerminal {
