@@ -1,5 +1,7 @@
 use indexmap::IndexMap;
 use ratatui::layout::Rect;
+use serde::{Serialize, Deserialize};
+use std::collections::HashSet;
 
 pub type SessionId = String;
 pub type WindowId = String;
@@ -13,6 +15,13 @@ pub struct AppState {
     pub focus: Focus,
     pub input_mode: InputMode,
     pub show_help: bool,
+    pub expanded_ids: HashSet<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct PersistentState {
+    pub focus: Focus,
+    pub expanded_ids: Vec<String>,
 }
 
 impl Default for AppState {
@@ -24,11 +33,51 @@ impl Default for AppState {
             focus: Focus::default(),
             input_mode: InputMode::TuiNormal,
             show_help: false,
+            expanded_ids: HashSet::new(),
         }
     }
 }
 
 impl AppState {
+    pub fn save_to_disk(&self) {
+        if let Some(proj_dirs) = directories::ProjectDirs::from("com", "tek", "ttree") {
+            let config_dir = proj_dirs.config_dir();
+            let _ = std::fs::create_dir_all(config_dir);
+            let state_path = config_dir.join("state.toml");
+            
+            let mut expanded_ids: Vec<String> = self.sessions.iter()
+                .filter(|(_, s)| s.expanded)
+                .map(|(id, _)| id.clone())
+                .collect();
+            expanded_ids.extend(self.windows.iter()
+                .filter(|(_, w)| w.expanded)
+                .map(|(id, _)| id.clone()));
+            
+            let persistent = PersistentState {
+                focus: self.focus.clone(),
+                expanded_ids,
+            };
+            
+            if let Ok(toml) = toml::to_string(&persistent) {
+                let _ = std::fs::write(state_path, toml);
+            }
+        }
+    }
+
+    pub fn load_from_disk() -> Self {
+        let mut state = Self::default();
+        if let Some(proj_dirs) = directories::ProjectDirs::from("com", "tek", "ttree") {
+            let state_path = proj_dirs.config_dir().join("state.toml");
+            if let Ok(content) = std::fs::read_to_string(state_path) {
+                if let Ok(persistent) = toml::from_str::<PersistentState>(&content) {
+                    state.focus = persistent.focus;
+                    state.expanded_ids = persistent.expanded_ids.into_iter().collect();
+                }
+            }
+        }
+        state
+    }
+
     pub fn get_flat_list(&self, mode: &NavMode) -> Vec<String> {
         let mut list = Vec::new();
         for session in self.sessions.values() {
@@ -223,7 +272,7 @@ pub struct Pane {
     pub region: Option<Rect>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum InputMode {
     TuiNormal,
     #[allow(dead_code)]
@@ -233,7 +282,8 @@ pub enum InputMode {
     #[allow(dead_code)]
     Command,
 }
-#[derive(Debug, Clone, Default)]
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Focus {
     pub panel: Panel,
     pub nav_mode: NavMode,
@@ -241,6 +291,7 @@ pub struct Focus {
     pub scroll_offset: usize,
     pub enable_scrolling: bool,
 }
+
 
 impl AppState {
     pub fn get_visible_list(&self) -> Vec<String> {
@@ -287,7 +338,7 @@ impl AppState {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub enum NavMode {
     Session,
     #[default]
@@ -295,7 +346,7 @@ pub enum NavMode {
     Pane,
 }
 
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub enum Panel {
     #[default]
     Tree,

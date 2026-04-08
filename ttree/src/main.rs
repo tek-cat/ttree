@@ -38,14 +38,18 @@ async fn sync_state(state: &mut AppState) -> Result<bool> {
 
     let old_panes: std::collections::HashSet<String> = state.panes.keys().cloned().collect();
 
-    let expanded_sessions: std::collections::HashSet<String> = state.sessions.iter()
+    let mut expanded_ids: std::collections::HashSet<String> = state.sessions.iter()
         .filter(|(_, s)| s.expanded)
         .map(|(id, _)| id.clone())
         .collect();
-    let expanded_windows: std::collections::HashSet<String> = state.windows.iter()
+    expanded_ids.extend(state.windows.iter()
         .filter(|(_, w)| w.expanded)
-        .map(|(id, _)| id.clone())
-        .collect();
+        .map(|(id, _)| id.clone()));
+    
+    // If we just loaded from disk and have no sessions yet, use the pre-loaded expanded_ids
+    if expanded_ids.is_empty() && !state.expanded_ids.is_empty() {
+        expanded_ids = state.expanded_ids.clone();
+    }
 
     state.sessions.clear();
     state.windows.clear();
@@ -59,7 +63,7 @@ async fn sync_state(state: &mut AppState) -> Result<bool> {
                 id: id.clone(),
                 name: parts[1].to_string(),
                 windows: Vec::new(),
-                expanded: expanded_sessions.is_empty() || expanded_sessions.contains(&id),
+                expanded: expanded_ids.contains(&id),
             });
         }
     }
@@ -77,7 +81,7 @@ async fn sync_state(state: &mut AppState) -> Result<bool> {
                 active: parts[3] == "1",
                 width: parts[4].parse().unwrap_or(80),
                 height: parts[5].parse().unwrap_or(24),
-                expanded: expanded_windows.is_empty() || expanded_windows.contains(&id),
+                expanded: expanded_ids.contains(&id),
             });
             if let Some(session) = state.sessions.get_mut(&session_id) {
                 session.windows.push(id);
@@ -137,8 +141,9 @@ async fn sync_state(state: &mut AppState) -> Result<bool> {
 async fn main() -> Result<()> {
     setup_panic_hook();
 
+    let mut state = AppState::load_from_disk();
     loop {
-        match run_app().await {
+        match run_app(&mut state).await {
             Ok(()) => {}
             Err(e) => {
                 eprintln!("Error: {}", e);
@@ -147,8 +152,7 @@ async fn main() -> Result<()> {
     }
 }
 
-async fn run_app() -> Result<()> {
-    let mut state = AppState::default();
+async fn run_app(state: &mut AppState) -> Result<()> {
     let last_error: Option<String> = None;
     let mut active_terminal: Option<EmbeddedTerminal> = None;
     let mut pty_task: Option<tokio::task::JoinHandle<()>> = None;
@@ -163,12 +167,12 @@ async fn run_app() -> Result<()> {
     let mut last_sync_update = tokio::time::Instant::now();
     let action_attach: Option<String>;
 
-    let _ = sync_state(&mut state).await;
+    let _ = sync_state(state).await;
 
     let mut last_terminal_size = terminal.size().unwrap_or(ratatui::layout::Size::new(80, 24));
     loop {
         if tokio::time::Instant::now() > last_sync_update + Duration::from_millis(200) {
-            let _ = sync_state(&mut state).await;
+            let _ = sync_state(state).await;
             last_sync_update = tokio::time::Instant::now();
         }
 
@@ -321,7 +325,7 @@ async fn run_app() -> Result<()> {
         }
 
         terminal.draw(|f| {
-            ui::render(f, &mut state, &active_terminal, &last_error);
+            ui::render(f, state, &active_terminal, &last_error);
         })?;
 
         if event::poll(Duration::from_millis(50))? {
@@ -347,6 +351,7 @@ async fn run_app() -> Result<()> {
 
                     match key.code {
                         KeyCode::Char('q') => {
+                            state.save_to_disk();
                             disable_raw_mode()?;
                             execute!(
                                 io::stdout(),
@@ -356,6 +361,7 @@ async fn run_app() -> Result<()> {
                             std::process::exit(0);
                         }
                         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            state.save_to_disk();
                             disable_raw_mode()?;
                             execute!(
                                 io::stdout(),
@@ -369,24 +375,30 @@ async fn run_app() -> Result<()> {
                         }
                         KeyCode::Enter => {
                             if let Some(sel) = &state.focus.selected_id {
+                                state.save_to_disk();
                                 action_attach = Some(sel.clone());
                                 break;
                             }
                         }
                         KeyCode::Up | KeyCode::Char('k') => {
                             state.move_selection_up();
+                            state.save_to_disk();
                         }
                         KeyCode::Down | KeyCode::Char('j') => {
                             state.move_selection_down();
+                            state.save_to_disk();
                         }
                         KeyCode::Left | KeyCode::Char('h') => {
                             state.switch_nav_left();
+                            state.save_to_disk();
                         }
                         KeyCode::Right | KeyCode::Char('l') => {
                             state.switch_nav_right();
+                            state.save_to_disk();
                         }
                         KeyCode::Char(' ') => {
                             state.toggle_expansion();
+                            state.save_to_disk();
                         }
                         _ => {}
                     }
