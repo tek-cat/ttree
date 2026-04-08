@@ -153,15 +153,11 @@ async fn run_app() -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut last_sync_update = tokio::time::Instant::now();
-    let mut action_attach = None;
-
-    let _ = sync_state(&mut state).await;
-    initial_sync = false;
-    last_selected_id = state.focus.selected_id.clone();
+    let mut last_sync_update = tokio::time::Instant::now() + Duration::from_secs(60);
+    let mut action_attach: Option<String> = None;
 
     loop {
-        if last_sync_update.elapsed() > Duration::from_secs(5) {
+        if last_sync_update.elapsed() > Duration::from_secs(60) {
             let _ = sync_state(&mut state).await;
             last_sync_update = tokio::time::Instant::now();
         }
