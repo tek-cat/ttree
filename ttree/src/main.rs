@@ -251,6 +251,8 @@ async fn run_app(state: &mut AppState) -> Result<()> {
                     let pty_system = native_pty_system();
                     if let Ok(pair) = pty_system.openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 }) {
                         let mut cmd = CommandBuilder::new("tmux");
+                        // Unset TMUX to prevent nesting issues in the preview
+                        cmd.env("TMUX", "");
                         let target_id_clone = target_id.clone();
                         if target_id_clone.starts_with('%') {
                             cmd.args(["select-pane", "-t", &target_id_clone, ";", "attach-session", "-t", &target_id_clone]);
@@ -474,6 +476,14 @@ async fn run_app(state: &mut AppState) -> Result<()> {
                     }
                 }
             }
+        }
+    }
+
+    if let Some(term) = &active_terminal {
+        if let Some(pid) = term.pty_pid {
+            let _ = std::process::Command::new("tmux")
+                .args(["detach-client", "-P", "-p", &pid.to_string()])
+                .output();
         }
     }
 
