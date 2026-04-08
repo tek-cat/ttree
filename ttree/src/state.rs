@@ -29,15 +29,23 @@ impl Default for AppState {
 }
 
 impl AppState {
-    fn get_flat_list(&self) -> Vec<String> {
+    pub fn get_flat_list(&self, mode: &NavMode) -> Vec<String> {
         let mut list = Vec::new();
         for session in self.sessions.values() {
-            list.push(session.id.clone());
-            if session.expanded {
+            if mode == &NavMode::Session {
+                list.push(session.id.clone());
+            } else {
+                if !session.expanded {
+                    continue;
+                }
                 for window_id in &session.windows {
-                    list.push(window_id.clone());
-                    if let Some(window) = self.windows.get(window_id) {
-                        if window.expanded {
+                    if mode == &NavMode::Window {
+                        list.push(window_id.clone());
+                    } else if mode == &NavMode::Pane {
+                        if let Some(window) = self.windows.get(window_id) {
+                            if !window.expanded {
+                                continue;
+                            }
                             for pane_id in &window.panes {
                                 list.push(pane_id.clone());
                             }
@@ -50,34 +58,107 @@ impl AppState {
     }
 
     pub fn move_selection_up(&mut self) {
-        let list = self.get_flat_list();
+        let list = self.get_flat_list(&self.focus.nav_mode);
         if list.is_empty() {
             return;
         }
 
-        let mut idx = 0;
         if let Some(sel) = &self.focus.selected_id {
-            idx = list.iter().position(|x| x == sel).unwrap_or(0);
+            if let Some(pos) = list.iter().position(|x| x == sel) {
+                if pos > 0 {
+                    self.focus.selected_id = Some(list[pos - 1].clone());
+                }
+                return;
+            }
         }
 
-        if idx > 0 {
-            self.focus.selected_id = Some(list[idx - 1].clone());
-        }
+        // If nothing selected or selection not in list, pick the last one for "up"
+        self.focus.selected_id = Some(list.last().unwrap().clone());
     }
 
     pub fn move_selection_down(&mut self) {
-        let list = self.get_flat_list();
+        let list = self.get_flat_list(&self.focus.nav_mode);
         if list.is_empty() {
             return;
         }
 
-        let mut idx = 0;
         if let Some(sel) = &self.focus.selected_id {
-            idx = list.iter().position(|x| x == sel).unwrap_or(0);
+            if let Some(pos) = list.iter().position(|x| x == sel) {
+                if pos + 1 < list.len() {
+                    self.focus.selected_id = Some(list[pos + 1].clone());
+                }
+                return;
+            }
         }
 
-        if idx + 1 < list.len() {
-            self.focus.selected_id = Some(list[idx + 1].clone());
+        // If nothing selected or selection not in list, pick the first one
+        self.focus.selected_id = Some(list[0].clone());
+    }
+
+    pub fn switch_nav_left(&mut self) {
+        match self.focus.nav_mode {
+            NavMode::Pane => {
+                self.focus.nav_mode = NavMode::Window;
+                if let Some(sel) = &self.focus.selected_id {
+                    if let Some(pane) = self.panes.get(sel) {
+                        self.focus.selected_id = Some(pane.window_id.clone());
+                    }
+                }
+            }
+            NavMode::Window => {
+                self.focus.nav_mode = NavMode::Session;
+                if let Some(sel) = &self.focus.selected_id {
+                    if let Some(window) = self.windows.get(sel) {
+                        self.focus.selected_id = Some(window.session_id.clone());
+                    }
+                }
+            }
+            NavMode::Session => {}
+        }
+        self.ensure_selected_expanded();
+    }
+
+    pub fn switch_nav_right(&mut self) {
+        match self.focus.nav_mode {
+            NavMode::Session => {
+                self.focus.nav_mode = NavMode::Window;
+                if let Some(sel) = &self.focus.selected_id {
+                    if let Some(session) = self.sessions.get(sel) {
+                        if !session.windows.is_empty() {
+                            self.focus.selected_id = Some(session.windows[0].clone());
+                        }
+                    }
+                }
+            }
+            NavMode::Window => {
+                self.focus.nav_mode = NavMode::Pane;
+                if let Some(sel) = &self.focus.selected_id {
+                    if let Some(window) = self.windows.get(sel) {
+                        if !window.panes.is_empty() {
+                            self.focus.selected_id = Some(window.panes[0].clone());
+                        }
+                    }
+                }
+            }
+            NavMode::Pane => {}
+        }
+        self.ensure_selected_expanded();
+    }
+
+    fn ensure_selected_expanded(&mut self) {
+        if let Some(sel) = &self.focus.selected_id {
+            if let Some(window) = self.windows.get(sel) {
+                if let Some(session) = self.sessions.get_mut(&window.session_id) {
+                    session.expanded = true;
+                }
+            } else if let Some(pane) = self.panes.get(sel) {
+                if let Some(window) = self.windows.get_mut(&pane.window_id) {
+                    window.expanded = true;
+                    if let Some(session) = self.sessions.get_mut(&window.session_id) {
+                        session.expanded = true;
+                    }
+                }
+            }
         }
     }
 
@@ -156,8 +237,17 @@ pub enum InputMode {
 #[derive(Debug, Clone, Default)]
 pub struct Focus {
     pub panel: Panel,
+    pub nav_mode: NavMode,
     pub selected_id: Option<String>,
     pub enable_scrolling: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub enum NavMode {
+    Session,
+    #[default]
+    Window,
+    Pane,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]

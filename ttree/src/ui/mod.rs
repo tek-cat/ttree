@@ -35,8 +35,9 @@ pub fn render(frame: &mut Frame, state: &AppState, preview_data: &Option<crate::
 
     // Status Bar
     let status_bar = Paragraph::new(format!(
-        " mux  [{:?}]  {} sessions  {} windows",
+        " mux  [{:?}]  Nav: {:?}  {} sessions  {} windows",
         state.input_mode,
+        state.focus.nav_mode,
         state.sessions.len(),
         state.windows.len()
     ))

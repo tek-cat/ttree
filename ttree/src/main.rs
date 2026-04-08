@@ -123,9 +123,10 @@ async fn sync_state(state: &mut AppState) -> Result<bool> {
         }
     }
 
-    if !state.sessions.is_empty() && state.focus.selected_id.is_none() {
-        if let Some(first) = state.sessions.keys().next() {
-            state.focus.selected_id = Some(first.clone());
+    if state.focus.selected_id.is_none() {
+        let list = state.get_flat_list(&state.focus.nav_mode);
+        if !list.is_empty() {
+            state.focus.selected_id = Some(list[0].clone());
         }
     }
 
@@ -377,6 +378,12 @@ async fn run_app() -> Result<()> {
                         }
                         KeyCode::Down | KeyCode::Char('j') => {
                             state.move_selection_down();
+                        }
+                        KeyCode::Left | KeyCode::Char('h') => {
+                            state.switch_nav_left();
+                        }
+                        KeyCode::Right | KeyCode::Char('l') => {
+                            state.switch_nav_right();
                         }
                         KeyCode::Char(' ') => {
                             state.toggle_expansion();
