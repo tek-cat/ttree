@@ -233,13 +233,58 @@ pub enum InputMode {
     #[allow(dead_code)]
     Command,
 }
-
 #[derive(Debug, Clone, Default)]
 pub struct Focus {
     pub panel: Panel,
     pub nav_mode: NavMode,
     pub selected_id: Option<String>,
+    pub scroll_offset: usize,
     pub enable_scrolling: bool,
+}
+
+impl AppState {
+    pub fn get_visible_list(&self) -> Vec<String> {
+        let mut list = Vec::new();
+        for session in self.sessions.values() {
+            list.push(session.id.clone());
+            if session.expanded {
+                for window_id in &session.windows {
+                    list.push(window_id.clone());
+                    if let Some(window) = self.windows.get(window_id) {
+                        if window.expanded {
+                            for pane_id in &window.panes {
+                                list.push(pane_id.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        list
+    }
+
+    pub fn update_scroll(&mut self, height: usize) {
+        let visible = self.get_visible_list();
+        if let Some(selected_id) = &self.focus.selected_id {
+            if let Some(pos) = visible.iter().position(|id| id == selected_id) {
+                if pos < self.focus.scroll_offset {
+                    self.focus.scroll_offset = pos;
+                } else if pos >= self.focus.scroll_offset + height {
+                    self.focus.scroll_offset = pos - height + 1;
+                }
+            }
+        }
+
+        // Clamp scroll_offset
+        if !visible.is_empty() {
+            let max_offset = visible.len().saturating_sub(height);
+            if self.focus.scroll_offset > max_offset {
+                self.focus.scroll_offset = max_offset;
+            }
+        } else {
+            self.focus.scroll_offset = 0;
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]

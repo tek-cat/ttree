@@ -321,7 +321,7 @@ async fn run_app() -> Result<()> {
         }
 
         terminal.draw(|f| {
-            ui::render(f, &state, &active_terminal, &last_error);
+            ui::render(f, &mut state, &active_terminal, &last_error);
         })?;
 
         if event::poll(Duration::from_millis(50))? {

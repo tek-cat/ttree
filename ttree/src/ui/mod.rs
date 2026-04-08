@@ -25,7 +25,7 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
     .split(popup_layout[1])[1]
 }
 
-pub fn render(frame: &mut Frame, state: &AppState, preview_data: &Option<crate::state::EmbeddedTerminal>, last_error: &Option<String>) {
+pub fn render(frame: &mut Frame, state: &mut AppState, preview_data: &Option<crate::state::EmbeddedTerminal>, last_error: &Option<String>) {
     let chunks = Layout::vertical([
         Constraint::Length(1),
         Constraint::Fill(1),
@@ -61,6 +61,10 @@ pub fn render(frame: &mut Frame, state: &AppState, preview_data: &Option<crate::
         .title(" Sessions ")
         .borders(Borders::RIGHT);
     let tree_area = tree_block.inner(body_chunks[0]);
+    
+    // Update scroll based on current tree area height
+    state.update_scroll(tree_area.height as usize);
+
     frame.render_widget(tree_block, body_chunks[0]);
     frame.render_widget(TreeWidget::new(state), tree_area);
 
