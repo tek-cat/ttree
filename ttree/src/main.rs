@@ -196,8 +196,10 @@ async fn run_app(state: &mut AppState) -> Result<()> {
                 let cols = current_size.width.saturating_sub(sidebar_width).saturating_sub(2);
                 let rows = current_size.height.saturating_sub(4);
                 
-                if let Ok(master) = term.pty_master.lock() {
-                    let _ = master.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
+                if cols > 0 && rows > 0 {
+                    if let Ok(master) = term.pty_master.lock() {
+                        let _ = master.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
+                    }
                 }
             }
             last_terminal_size = current_size;
@@ -249,17 +251,16 @@ async fn run_app(state: &mut AppState) -> Result<()> {
                     let parser = Arc::new(RwLock::new(vt100::Parser::new(rows, cols, 0)));
                     
                     let pty_system = native_pty_system();
-                    if let Ok(pair) = pty_system.openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 }) {
+                    let pty_rows = if rows > 0 { rows } else { 24 };
+                    let pty_cols = if cols > 0 { cols } else { 80 };
+
+                    if let Ok(pair) = pty_system.openpty(PtySize { rows: pty_rows, cols: pty_cols, pixel_width: 0, pixel_height: 0 }) {
                         let mut cmd = CommandBuilder::new("tmux");
                         // Unset TMUX to prevent nesting issues in the preview
                         cmd.env("TMUX", "");
                         cmd.env("TMUX_PANE", "");
                         let target_id_clone = target_id.clone();
-                        if target_id_clone.starts_with('%') {
-                            cmd.args(["select-pane", "-t", &target_id_clone, ";", "attach-session", "-t", &target_id_clone]);
-                        } else {
-                            cmd.args(["attach", "-t", &target_id_clone]);
-                        }
+                        cmd.args(["attach-session", "-t", &target_id_clone]);
                         
                         if let Ok(child) = pair.slave.spawn_command(cmd) {
                             let pid = child.process_id();
@@ -493,27 +494,12 @@ async fn run_app(state: &mut AppState) -> Result<()> {
     terminal.show_cursor()?;
 
     if let Some(target) = action_attach {
-        let mut session_target = target.clone();
-        let use_pane = target.starts_with('%');
-        
-        if state.windows.contains_key(&target) {
-            session_target = state.windows.get(&target).unwrap().session_id.clone();
-        } else if state.panes.contains_key(&target) {
-            let win_id = &state.panes.get(&target).unwrap().window_id;
-            session_target = state.windows.get(win_id).unwrap().session_id.clone();
-        }
-        
-        if use_pane {
-            let mut child = tokio::process::Command::new("tmux")
-                .args(["select-pane", "-t", &target, ";", "attach-session", "-t", &session_target])
-                .spawn()?;
-            let _ = child.wait().await;
-        } else {
-            let mut child = tokio::process::Command::new("tmux")
-                .args(["attach-session", "-t", &session_target])
-                .spawn()?;
-            let _ = child.wait().await;
-        }
+        let mut cmd = tokio::process::Command::new("tmux");
+        cmd.env_remove("TMUX")
+           .env_remove("TMUX_PANE")
+           .args(["attach-session", "-t", &target]);
+        let mut child = cmd.spawn()?;
+        let _ = child.wait().await;
     }
 
     Ok(())
