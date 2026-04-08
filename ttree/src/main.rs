@@ -145,6 +145,7 @@ async fn run_app() -> Result<()> {
     let mut active_terminal: Option<EmbeddedTerminal> = None;
     let mut pty_task: Option<tokio::task::JoinHandle<()>> = None;
     let mut last_selected_id: Option<String> = None;
+    let mut initial_sync = true;
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -156,18 +157,22 @@ async fn run_app() -> Result<()> {
     let mut action_attach = None;
 
     let _ = sync_state(&mut state).await;
+    initial_sync = false;
+    last_selected_id = state.focus.selected_id.clone();
 
     loop {
-        if last_sync_update.elapsed() > Duration::from_secs(2) {
+        if last_sync_update.elapsed() > Duration::from_secs(5) {
             let _ = sync_state(&mut state).await;
             last_sync_update = tokio::time::Instant::now();
         }
 
-        if state.focus.selected_id != last_selected_id {
+        if state.focus.selected_id != last_selected_id && !initial_sync {
             if let Some(task) = pty_task.take() {
                 task.abort();
             }
             active_terminal = None;
+
+            state.focus.enable_scrolling = true;
 
             if let Some(target_id) = &state.focus.selected_id {
                 let (tx, rx) = tokio::sync::mpsc::unbounded_channel();

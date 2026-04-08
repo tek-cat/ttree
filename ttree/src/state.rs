@@ -53,13 +53,15 @@ impl AppState {
 
     pub fn move_selection_up(&mut self) {
         let list = self.get_flat_list();
-        if list.is_empty() { return; }
-        
+        if list.is_empty() {
+            return;
+        }
+
         let mut idx = 0;
         if let Some(sel) = &self.focus.selected_id {
             idx = list.iter().position(|x| x == sel).unwrap_or(0);
         }
-        
+
         if idx > 0 {
             self.focus.selected_id = Some(list[idx - 1].clone());
         }
@@ -67,13 +69,15 @@ impl AppState {
 
     pub fn move_selection_down(&mut self) {
         let list = self.get_flat_list();
-        if list.is_empty() { return; }
-        
+        if list.is_empty() {
+            return;
+        }
+
         let mut idx = 0;
         if let Some(sel) = &self.focus.selected_id {
             idx = list.iter().position(|x| x == sel).unwrap_or(0);
         }
-        
+
         if idx + 1 < list.len() {
             self.focus.selected_id = Some(list[idx + 1].clone());
         }
@@ -119,7 +123,9 @@ pub struct EmbeddedTerminal {
 
 impl std::fmt::Debug for EmbeddedTerminal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("EmbeddedTerminal").field("target_id", &self.target_id).finish()
+        f.debug_struct("EmbeddedTerminal")
+            .field("target_id", &self.target_id)
+            .finish()
     }
 }
 
@@ -145,6 +151,7 @@ pub enum InputMode {
 pub struct Focus {
     pub panel: Panel,
     pub selected_id: Option<String>,
+    pub enable_scrolling: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
