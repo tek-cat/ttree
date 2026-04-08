@@ -46,6 +46,8 @@ async fn sync_state(state: &mut AppState) -> Result<bool> {
         .filter(|(_, w)| w.expanded)
         .map(|(id, _)| id.clone()));
     
+    let is_initial_load = state.sessions.is_empty();
+
     // If we just loaded from disk and have no sessions yet, use the pre-loaded expanded_ids
     if expanded_ids.is_empty() && !state.expanded_ids.is_empty() {
         expanded_ids = state.expanded_ids.clone();
@@ -59,11 +61,17 @@ async fn sync_state(state: &mut AppState) -> Result<bool> {
         let parts: Vec<&str> = s.split('\u{001f}').collect();
         if parts.len() >= 2 {
             let id = parts[0].to_string();
+            let expanded = if is_initial_load && state.expanded_ids.is_empty() {
+                true // Default to expanded on very first run
+            } else {
+                expanded_ids.contains(&id)
+            };
+
             state.sessions.insert(id.clone(), crate::state::Session {
                 id: id.clone(),
                 name: parts[1].to_string(),
                 windows: Vec::new(),
-                expanded: expanded_ids.contains(&id),
+                expanded,
             });
         }
     }
@@ -73,6 +81,13 @@ async fn sync_state(state: &mut AppState) -> Result<bool> {
         if parts.len() >= 6 {
             let id = parts[0].to_string();
             let session_id = parts[1].to_string();
+            
+            let expanded = if is_initial_load && state.expanded_ids.is_empty() {
+                true // Default to expanded on very first run
+            } else {
+                expanded_ids.contains(&id)
+            };
+
             state.windows.insert(id.clone(), crate::state::Window {
                 id: id.clone(),
                 session_id: session_id.clone(),
@@ -81,7 +96,7 @@ async fn sync_state(state: &mut AppState) -> Result<bool> {
                 active: parts[3] == "1",
                 width: parts[4].parse().unwrap_or(80),
                 height: parts[5].parse().unwrap_or(24),
-                expanded: expanded_ids.contains(&id),
+                expanded,
             });
             if let Some(session) = state.sessions.get_mut(&session_id) {
                 session.windows.push(id);
@@ -116,22 +131,20 @@ async fn sync_state(state: &mut AppState) -> Result<bool> {
     let new_panes: std::collections::HashSet<String> = state.panes.keys().cloned().collect();
     let changed = old_panes != new_panes;
 
+    let mut current_list = state.get_flat_list(&state.focus.nav_mode);
+    if current_list.is_empty() && state.focus.nav_mode != crate::state::NavMode::Session {
+        state.focus.nav_mode = crate::state::NavMode::Session;
+        current_list = state.get_flat_list(&state.focus.nav_mode);
+    }
+
     if let Some(sel) = &state.focus.selected_id {
-        if !state.sessions.contains_key(sel) 
-            && !state.windows.contains_key(sel) 
-            && !state.panes.contains_key(sel) {
+        if !current_list.contains(sel) {
             state.focus.selected_id = None;
-            if let Some(first) = state.sessions.keys().next() {
-                state.focus.selected_id = Some(first.clone());
-            }
         }
     }
 
-    if state.focus.selected_id.is_none() {
-        let list = state.get_flat_list(&state.focus.nav_mode);
-        if !list.is_empty() {
-            state.focus.selected_id = Some(list[0].clone());
-        }
+    if state.focus.selected_id.is_none() && !current_list.is_empty() {
+        state.focus.selected_id = Some(current_list[0].clone());
     }
 
     Ok(changed)
