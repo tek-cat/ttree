@@ -25,9 +25,15 @@ fn setup_panic_hook() {
 }
 
 async fn sync_state(state: &mut AppState) -> Result<bool> {
-    let sessions_raw = Tmux::list_sessions().await.unwrap_or_default();
-    let windows_raw = Tmux::list_windows().await.unwrap_or_default();
-    let panes_raw = Tmux::list_panes().await.unwrap_or_default();
+    let (sessions_raw, windows_raw, panes_raw) = tokio::join!(
+        Tmux::list_sessions(),
+        Tmux::list_windows(),
+        Tmux::list_panes()
+    );
+
+    let sessions_raw = sessions_raw.unwrap_or_default();
+    let windows_raw = windows_raw.unwrap_or_default();
+    let panes_raw = panes_raw.unwrap_or_default();
 
     let old_panes: std::collections::HashSet<String> = state.panes.keys().cloned().collect();
 
@@ -153,13 +159,21 @@ async fn run_app() -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut last_sync_update = tokio::time::Instant::now() + Duration::from_secs(60);
+    let mut last_sync_update = tokio::time::Instant::now();
     let mut action_attach: Option<String> = None;
 
+    let _ = sync_state(&mut state).await;
+    initial_sync = false;
+    last_selected_id = state.focus.selected_id.clone();
+
     loop {
-        if last_sync_update.elapsed() > Duration::from_secs(60) {
+        if tokio::time::Instant::now() > last_sync_update + Duration::from_millis(200) {
             let _ = sync_state(&mut state).await;
             last_sync_update = tokio::time::Instant::now();
+        }
+
+        if event::poll(Duration::from_millis(50))? {
+            let Event::Key(key) = event::read()? else { continue };
         }
 
         if state.focus.selected_id != last_selected_id && !initial_sync {
