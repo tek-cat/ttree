@@ -40,6 +40,7 @@ impl Tmux {
             .collect())
     }
 
+    #[allow(dead_code)]
     pub async fn capture_pane(pane_id: &str) -> Result<String> {
         let output = Command::new("tmux")
             .args(["capture-pane", "-p", "-t", pane_id])

@@ -12,7 +12,6 @@ pub struct AppState {
     pub panes: IndexMap<PaneId, Pane>,
     pub focus: Focus,
     pub input_mode: InputMode,
-    pub cmd_counter: u64,
     pub show_help: bool,
 }
 
@@ -24,7 +23,6 @@ impl Default for AppState {
             panes: IndexMap::new(),
             focus: Focus::default(),
             input_mode: InputMode::TuiNormal,
-            cmd_counter: 0,
             show_help: false,
         }
     }
@@ -109,7 +107,9 @@ pub struct Window {
     pub name: String,
     pub panes: Vec<PaneId>,
     pub active: bool,
+    #[allow(dead_code)]
     pub width: u16,
+    #[allow(dead_code)]
     pub height: u16,
     pub expanded: bool,
 }
@@ -120,6 +120,7 @@ pub struct EmbeddedTerminal {
     pub pty_writer: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
     pub target_id: String,
     pub pty_pid: Option<u32>,
+    #[allow(dead_code)]
     pub pty_master: std::sync::Arc<std::sync::Mutex<Box<dyn portable_pty::MasterPty + Send>>>,
 }
 
@@ -144,8 +145,11 @@ pub struct Pane {
 #[derive(Debug, Clone, PartialEq)]
 pub enum InputMode {
     TuiNormal,
+    #[allow(dead_code)]
     PtyPassthrough { pane_id: PaneId },
+    #[allow(dead_code)]
     FuzzySearch,
+    #[allow(dead_code)]
     Command,
 }
 

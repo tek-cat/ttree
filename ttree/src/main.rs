@@ -160,7 +160,7 @@ async fn run_app() -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     let mut last_sync_update = tokio::time::Instant::now();
-    let mut action_attach: Option<String> = None;
+    let action_attach: Option<String>;
 
     let _ = sync_state(&mut state).await;
 
@@ -240,7 +240,7 @@ async fn run_app() -> Result<()> {
                             cmd.args(["attach", "-t", &target_id_clone]);
                         }
                         
-                        if let Ok(mut child) = pair.slave.spawn_command(cmd) {
+                        if let Ok(child) = pair.slave.spawn_command(cmd) {
                             let pid = child.process_id();
                             drop(pair.slave);
                             
