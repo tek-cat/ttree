@@ -16,6 +16,7 @@ pub struct AppState {
     pub input_mode: InputMode,
     pub show_help: bool,
     pub expanded_ids: HashSet<String>,
+    pub last_target_id: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -34,6 +35,7 @@ impl Default for AppState {
             input_mode: InputMode::TuiNormal,
             show_help: false,
             expanded_ids: HashSet::new(),
+            last_target_id: None,
         }
     }
 }
@@ -228,6 +230,8 @@ pub struct Session {
     pub name: String,
     pub windows: Vec<WindowId>,
     pub expanded: bool,
+    pub last_attached: i64,
+    pub attached: bool,
 }
 
 #[derive(Debug, Clone)]

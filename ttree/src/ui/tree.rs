@@ -42,11 +42,13 @@ impl<'a> Widget for TreeWidget<'a> {
                     style = style.add_modifier(Modifier::BOLD);
                 }
 
+                let attached_label = if session.attached { " (attached)" } else { "" };
+
                 let line = Line::from(vec![
                     Span::styled(format!("{} ", icon), style.fg(Color::Yellow)),
                     Span::styled(session.name.clone(), style),
                     Span::styled(
-                        format!(" ({})", session.windows.len()),
+                        format!(" ({}{})", session.windows.len(), attached_label),
                         style.fg(Color::Gray),
                     ),
                 ]);
@@ -145,11 +147,16 @@ impl<'a> Widget for TreeWidget<'a> {
                                             "    ├─ "
                                         };
                                         let line = Line::from(vec![
-                                            Span::styled(connector, Style::default().bg(pane_bg_color)),
+                                            Span::styled(
+                                                connector,
+                                                Style::default().bg(pane_bg_color),
+                                            ),
                                             Span::styled(pane_name, pane_active_style),
                                             Span::styled(
                                                 layout_hint,
-                                                Style::default().bg(pane_bg_color).fg(Color::DarkGray),
+                                                Style::default()
+                                                    .bg(pane_bg_color)
+                                                    .fg(Color::DarkGray),
                                             ),
                                         ]);
                                         buf.set_line(area.x, y, &line, area.width);

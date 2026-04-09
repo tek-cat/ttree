@@ -59,7 +59,7 @@ async fn sync_state(state: &mut AppState) -> Result<bool> {
 
     for s in sessions_raw {
         let parts: Vec<&str> = s.split('\u{001f}').collect();
-        if parts.len() >= 2 {
+        if parts.len() >= 4 {
             let id = parts[0].to_string();
             let expanded = if is_initial_load && state.expanded_ids.is_empty() {
                 true // Default to expanded on very first run
@@ -72,6 +72,8 @@ async fn sync_state(state: &mut AppState) -> Result<bool> {
                 name: parts[1].to_string(),
                 windows: Vec::new(),
                 expanded,
+                last_attached: parts[2].parse().unwrap_or(0),
+                attached: parts[3] == "1",
             });
         }
     }
@@ -144,7 +146,74 @@ async fn sync_state(state: &mut AppState) -> Result<bool> {
     }
 
     if state.focus.selected_id.is_none() && !current_list.is_empty() {
-        state.focus.selected_id = Some(current_list[0].clone());
+        // Try to find the most appropriate active pane to focus
+        let mut active_pane = if let Ok(current_pane) = std::env::var("TMUX_PANE") {
+            state.panes.get(&current_pane).cloned()
+        } else { None };
+
+        // 2. Try the last target we attached to in this ttree session
+        if active_pane.is_none() {
+            if let Some(target_id) = &state.last_target_id {
+                if let Some(p) = state.panes.get(target_id) {
+                    active_pane = Some(p.clone());
+                } else if let Some(w) = state.windows.get(target_id) {
+                    active_pane = w.panes.iter()
+                        .find_map(|pid| state.panes.get(pid).filter(|p| p.active))
+                        .cloned();
+                } else if let Some(s) = state.sessions.get(target_id) {
+                    active_pane = s.windows.iter()
+                        .find_map(|wid| {
+                            state.windows.get(wid)
+                                .filter(|w| w.active)
+                                .and_then(|w| w.panes.iter().find_map(|pid| state.panes.get(pid).filter(|p| p.active)))
+                        })
+                        .cloned();
+                }
+            }
+        }
+
+        // 3. Fallback to sorting by last_attached
+        if active_pane.is_none() {
+            let mut active_panes: Vec<_> = state.panes.values()
+                .filter(|p| {
+                    p.active && state.windows.get(&p.window_id).map(|w| w.active).unwrap_or(false)
+                })
+                .collect();
+            
+            // Sort by session activity to pick the most recently active one
+            active_panes.sort_by(|a, b| {
+                let sess_a = state.windows.get(&a.window_id).and_then(|w| state.sessions.get(&w.session_id));
+                let sess_b = state.windows.get(&b.window_id).and_then(|w| state.sessions.get(&w.session_id));
+                
+                let time_a = sess_a.map(|s| s.last_attached).unwrap_or(0);
+                let time_b = sess_b.map(|s| s.last_attached).unwrap_or(0);
+                
+                if time_a != time_b {
+                    return time_b.cmp(&time_a); // Newest first
+                }
+
+                // Tie-breaker: attached sessions
+                let att_a = sess_a.map(|s| s.attached).unwrap_or(false);
+                let att_b = sess_b.map(|s| s.attached).unwrap_or(false);
+                att_b.cmp(&att_a)
+            });
+
+            active_pane = active_panes.first().cloned().cloned();
+        }
+
+        if let Some(pane) = active_pane {
+            state.focus.selected_id = Some(pane.id.clone());
+            state.focus.nav_mode = crate::state::NavMode::Pane;
+            // Ensure path to active pane is expanded
+            if let Some(window) = state.windows.get_mut(&pane.window_id) {
+                window.expanded = true;
+                if let Some(session) = state.sessions.get_mut(&window.session_id) {
+                    session.expanded = true;
+                }
+            }
+        } else {
+            state.focus.selected_id = Some(current_list[0].clone());
+        }
     }
 
     Ok(changed)
@@ -157,7 +226,12 @@ async fn main() -> Result<()> {
     let mut state = AppState::load_from_disk();
     loop {
         match run_app(&mut state).await {
-            Ok(()) => {}
+            Ok(()) => {
+                let last_target = state.last_target_id.clone();
+                // Reload state from disk to get the latest focus/expanded state
+                state = AppState::load_from_disk();
+                state.last_target_id = last_target;
+            }
             Err(e) => {
                 eprintln!("Error: {}", e);
             }
@@ -180,9 +254,16 @@ async fn run_app(state: &mut AppState) -> Result<()> {
     let mut last_sync_update = tokio::time::Instant::now();
     let action_attach: Option<String>;
 
+    // If we're inside tmux, we want to start by focusing the active pane.
+    // Otherwise, we prefer to keep our previous selection (e.g. after a detach)
+    if std::env::var("TMUX").is_ok() {
+        state.focus.selected_id = None;
+    }
     let _ = sync_state(state).await;
 
     let mut last_terminal_size = terminal.size().unwrap_or(ratatui::layout::Size::new(80, 24));
+    let mut current_switch_task: Option<tokio::task::JoinHandle<()>> = None;
+
     loop {
         if tokio::time::Instant::now() > last_sync_update + Duration::from_millis(200) {
             let _ = sync_state(state).await;
@@ -214,7 +295,11 @@ async fn run_app(state: &mut AppState) -> Result<()> {
                     term.target_id = target_id.clone();
                     
                     if let Some(pid) = term.pty_pid {
-                        tokio::spawn(async move {
+                        if let Some(prev) = current_switch_task.take() {
+                            prev.abort();
+                        }
+
+                        current_switch_task = Some(tokio::spawn(async move {
                             if let Ok(output) = tokio::process::Command::new("tmux")
                                 .args(["list-clients", "-F", "#{client_pid} #{client_tty}"])
                                 .output()
@@ -232,20 +317,16 @@ async fn run_app(state: &mut AppState) -> Result<()> {
                                 
                                 if let Some(tty) = client_tty {
                                     let mut cmd = tokio::process::Command::new("tmux");
-                                    if target_id_clone.starts_with('%') {
-                                        cmd.args(["select-pane", "-t", &target_id_clone, ";"]);
-                                    }
                                     cmd.args(["switch-client", "-c", &tty, "-t", &target_id_clone]);
                                     let _ = cmd.output().await;
                                 }
                             }
-                        });
+                        }));
                     }
                 } else {
-                    let size = terminal.size().unwrap_or(ratatui::layout::Size::new(80, 24));
-                    let sidebar_width = (size.width as f32 * 0.28) as u16;
-                    let cols = size.width.saturating_sub(sidebar_width).saturating_sub(2);
-                    let rows = size.height.saturating_sub(4);
+                    let sidebar_width = (current_size.width as f32 * 0.28) as u16;
+                    let cols = current_size.width.saturating_sub(sidebar_width).saturating_sub(2);
+                    let rows = current_size.height.saturating_sub(4);
 
                     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
                     let parser = Arc::new(RwLock::new(vt100::Parser::new(rows, cols, 0)));
@@ -262,7 +343,7 @@ async fn run_app(state: &mut AppState) -> Result<()> {
                         let target_id_clone = target_id.clone();
                         cmd.args(["attach-session", "-t", &target_id_clone]);
                         
-                        if let Ok(child) = pair.slave.spawn_command(cmd) {
+                        if let Ok(mut child) = pair.slave.spawn_command(cmd) {
                             let pid = child.process_id();
                             drop(pair.slave);
                             
@@ -301,22 +382,8 @@ async fn run_app(state: &mut AppState) -> Result<()> {
                                 }
                             });
 
-                            let child_arc = std::sync::Arc::new(std::sync::Mutex::new(child));
-                            let handle = tokio::spawn(async move {
-                                loop {
-                                    let status = {
-                                        if let Ok(mut c) = child_arc.lock() {
-                                            c.try_wait()
-                                        } else {
-                                            break;
-                                        }
-                                    };
-                                    match status {
-                                        Ok(Some(_)) => break,
-                                        Ok(None) => tokio::time::sleep(std::time::Duration::from_millis(100)).await,
-                                        Err(_) => break,
-                                    }
-                                }
+                            let handle = tokio::task::spawn_blocking(move || {
+                                let _ = child.wait();
                                 reader_task.abort();
                                 writer_task.abort();
                             });
@@ -392,6 +459,7 @@ async fn run_app(state: &mut AppState) -> Result<()> {
                         }
                         KeyCode::Enter => {
                             if let Some(sel) = &state.focus.selected_id {
+                                state.last_target_id = Some(sel.clone());
                                 state.save_to_disk();
                                 action_attach = Some(sel.clone());
                                 break;
@@ -481,7 +549,16 @@ async fn run_app(state: &mut AppState) -> Result<()> {
         }
     }
 
-    if let Some(task) = pty_task {
+    if let Some(term) = active_terminal.take() {
+        if let Some(pid) = term.pty_pid {
+            let _ = tokio::process::Command::new("kill")
+                .arg(pid.to_string())
+                .output()
+                .await;
+        }
+    }
+
+    if let Some(task) = pty_task.take() {
         task.abort();
     }
 
@@ -495,9 +572,13 @@ async fn run_app(state: &mut AppState) -> Result<()> {
 
     if let Some(target) = action_attach {
         let mut cmd = tokio::process::Command::new("tmux");
-        cmd.env_remove("TMUX")
-           .env_remove("TMUX_PANE")
-           .args(["attach-session", "-t", &target]);
+        if std::env::var("TMUX").is_ok() {
+            cmd.args(["switch-client", "-t", &target]);
+        } else {
+            cmd.env_remove("TMUX")
+               .env_remove("TMUX_PANE")
+               .args(["attach-session", "-t", &target]);
+        }
         let mut child = cmd.spawn()?;
         let _ = child.wait().await;
     }

@@ -6,7 +6,7 @@ pub struct Tmux;
 impl Tmux {
     pub async fn list_sessions() -> Result<Vec<String>> {
         let output = Command::new("tmux")
-            .args(["list-sessions", "-F", "#{session_id}\u{001F}#{session_name}"])
+            .args(["list-sessions", "-F", "#{session_id}\u{001F}#{session_name}\u{001F}#{session_last_attached}\u{001F}#{session_attached}"])
             .output()
             .await?;
         if !output.status.success() {
