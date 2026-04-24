@@ -7,132 +7,262 @@ Set Height 675
 Set Theme "Catppuccin Mocha"
 Set Padding 0
 Set TypingSpeed 80ms
-Set PlaybackSpeed 1.0
 
-# ── Hidden setup: build demo tmux environment ─────────────────────────────────
+# ── Hidden setup: build demo environment ──────────────────────────────────────
 Hide
 
-# Clean slate
 Type "tmux kill-server 2>/dev/null; true"
 Enter
-Sleep 800ms
+Sleep 1s
 
-# Session: work  (vim editing a Rust file)
-Type "tmux new-session -d -s work -x 200 -y 50"
+# Demo session: work (vim open)
+Type "tmux new-session -d -s work -x 140 -y 33"
 Enter
+Sleep 100ms
 Type "tmux send-keys -t work 'vim src/main.rs' Enter"
 Enter
-Sleep 300ms
+Sleep 200ms
 
-# Session: monitoring  (htop)
-Type "tmux new-session -d -s monitoring -x 200 -y 50"
+# Demo session: monitoring (htop)
+Type "tmux new-session -d -s monitoring -x 140 -y 33"
 Enter
+Sleep 100ms
 Type "tmux send-keys -t monitoring 'htop' Enter"
 Enter
+Sleep 200ms
+
+# Demo session: build (cargo running)
+Type "tmux new-session -d -s build -x 140 -y 33"
+Enter
+Sleep 100ms
+Type "tmux send-keys -t build 'cargo build --release' Enter"
+Enter
 Sleep 300ms
 
-# Session: build  (idle shell, simulate a finished build)
-Type "tmux new-session -d -s build -x 200 -y 50"
-Enter
-Type "tmux send-keys -t build 'cargo build --release 2>&1 | tail -3' Enter"
-Enter
-Sleep 300ms
-
-# Session: agents  (multiple windows to show hierarchy)
-Type "tmux new-session -d -s agents -x 200 -y 50"
+# Demo session: agents (3 windows, shows hierarchy)
+Type "tmux new-session -d -s agents -x 140 -y 33"
 Enter
 Type "tmux new-window -t agents"
 Enter
 Type "tmux new-window -t agents"
 Enter
-Type "tmux send-keys -t agents:0 'echo Running agent task...' Enter"
+Type "tmux send-keys -t agents:0 'echo [agent-1] running' Enter"
 Enter
-Type "tmux send-keys -t agents:1 'echo Waiting for results...' Enter"
+Type "tmux send-keys -t agents:1 'echo [agent-2] processing' Enter"
 Enter
-Type "tmux send-keys -t agents:2 'echo Processing output...' Enter"
+Type "tmux send-keys -t agents:2 'echo [agent-3] idle' Enter"
 Enter
-Sleep 500ms
+Sleep 300ms
+
+# Display session: split layout (top: ttree, bottom: 4-line description bar)
+Type "tmux new-session -d -s ttree -x 140 -y 37"
+Enter
+Sleep 100ms
+Type "tmux split-window -v -l 4 -t ttree:0"
+Enter
+Sleep 100ms
+
+# Pre-seed the description pane with the startup message
+Type "tmux send-keys -t ttree:0.1 'cd ~/Projects/ttree/demo && ./desc.sh \"ttree\" \"a live tmux session manager — tree navigation with embedded pane preview\"' Enter"
+Enter
+Sleep 400ms
+
+# Attach
+Type "tmux attach-session -t ttree"
+Enter
+Sleep 1500ms
 
 Show
 
-# ── Launch ttree ──────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# SECTION 1 — Launch
+# ══════════════════════════════════════════════════════════════════════════════
+
 Type "ttree"
 Enter
-Sleep 2500ms
+Sleep 3500ms
 
-# ── Navigate the tree ─────────────────────────────────────────────────────────
-# Move down through sessions
-Down
-Sleep 400ms
-Down
-Sleep 400ms
-Down
-Sleep 400ms
+# ══════════════════════════════════════════════════════════════════════════════
+# SECTION 2 — Tree navigation
+# ══════════════════════════════════════════════════════════════════════════════
 
-# Expand the agents session (it has multiple windows)
-Space
+Ctrl+b
+o
+Sleep 300ms
+Set TypingSpeed 0ms
+Type "./desc.sh \"Tree navigation\" \"j / k  to move up and down  ·  Space to expand or collapse\""
+Enter
+Set TypingSpeed 80ms
+Sleep 300ms
+Ctrl+b
+o
+Sleep 800ms
+
+Down
+Sleep 700ms
+Down
+Sleep 700ms
+Down
+Sleep 700ms
+Up
+Sleep 700ms
+Up
+Sleep 700ms
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SECTION 3 — Expand / collapse hierarchy
+# ══════════════════════════════════════════════════════════════════════════════
+
+Ctrl+b
+o
+Sleep 300ms
+Set TypingSpeed 0ms
+Type "./desc.sh \"Expand / collapse\" \"the agents session has 3 windows — press Space to reveal them\""
+Enter
+Set TypingSpeed 80ms
+Sleep 300ms
+Ctrl+b
+o
+Sleep 800ms
+
+# Navigate to agents session and expand it
+Down
 Sleep 600ms
 Down
-Sleep 350ms
-Down
-Sleep 350ms
-Down
-Sleep 350ms
-
-# Collapse it back
-Space
 Sleep 600ms
+Space
+Sleep 1200ms
+Down
+Sleep 700ms
+Down
+Sleep 700ms
+Down
+Sleep 700ms
+Space
+Sleep 1200ms
 
-# Navigate back up to monitoring
-Up
-Sleep 350ms
-Up
-Sleep 350ms
+# ══════════════════════════════════════════════════════════════════════════════
+# SECTION 4 — Live preview
+# ══════════════════════════════════════════════════════════════════════════════
 
-# ── Open preview panel ────────────────────────────────────────────────────────
+Ctrl+b
+o
+Sleep 300ms
+Set TypingSpeed 0ms
+Type "./desc.sh \"Live pane preview\" \"press Enter to open an embedded terminal showing the active pane in real time\""
+Enter
+Set TypingSpeed 80ms
+Sleep 300ms
+Ctrl+b
+o
+Sleep 800ms
+
+Up
 Sleep 500ms
+Up
+Sleep 500ms
+Enter
+Sleep 3000ms
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SECTION 5 — Switch sessions while staying in preview
+# ══════════════════════════════════════════════════════════════════════════════
+
+Ctrl+b
+o
+Sleep 300ms
+Set TypingSpeed 0ms
+Type "./desc.sh \"Session switching\" \"click or navigate the sidebar to switch sessions — preview updates instantly\""
+Enter
+Set TypingSpeed 80ms
+Sleep 300ms
+Ctrl+b
+o
+Sleep 800ms
+
+Down
+Sleep 1500ms
+Down
+Sleep 1500ms
+Down
+Sleep 1500ms
+
+# Return to tree mode
+Ctrl+p
+Sleep 1000ms
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SECTION 6 — New session
+# ══════════════════════════════════════════════════════════════════════════════
+
+Ctrl+b
+o
+Sleep 300ms
+Set TypingSpeed 0ms
+Type "./desc.sh \"New session\" \"press n  to create a session — it appears in the tree immediately\""
+Enter
+Set TypingSpeed 80ms
+Sleep 300ms
+Ctrl+b
+o
+Sleep 800ms
+
+Type "n"
+Sleep 800ms
+Type "new-feature"
+Sleep 600ms
 Enter
 Sleep 2000ms
 
-# ── Switch sessions in preview by navigating sidebar ─────────────────────────
-Down
-Sleep 800ms
-Down
-Sleep 800ms
-Down
-Sleep 800ms
+# ══════════════════════════════════════════════════════════════════════════════
+# SECTION 7 — Rename
+# ══════════════════════════════════════════════════════════════════════════════
 
-# ── Return to tree mode ───────────────────────────────────────────────────────
-Ctrl+p
-Sleep 600ms
-
-# ── Create a new session ──────────────────────────────────────────────────────
-Type "n"
-Sleep 600ms
-Type "new-feature"
-Sleep 400ms
+Ctrl+b
+o
+Sleep 300ms
+Set TypingSpeed 0ms
+Type "./desc.sh \"Rename\" \"press r to rename the selected session inline\""
 Enter
-Sleep 1200ms
+Set TypingSpeed 80ms
+Sleep 300ms
+Ctrl+b
+o
+Sleep 800ms
 
-# ── Rename a session ─────────────────────────────────────────────────────────
-# Navigate to the build session
 Up
-Sleep 350ms
-Up
-Sleep 350ms
-Type "r"
 Sleep 600ms
-# Clear pre-filled name and type new one
+Up
+Sleep 600ms
+Type "r"
+Sleep 800ms
 Backspace
 Backspace
 Backspace
 Backspace
 Backspace
 Type "release"
-Sleep 400ms
+Sleep 600ms
 Enter
-Sleep 1000ms
+Sleep 1800ms
 
-# ── Attach to a session ───────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# SECTION 8 — Attach
+# ══════════════════════════════════════════════════════════════════════════════
+
+Ctrl+b
+o
+Sleep 300ms
+Set TypingSpeed 0ms
+Type "./desc.sh \"Attach\" \"press a to detach ttree and attach directly to the selected session\""
+Enter
+Set TypingSpeed 80ms
+Sleep 300ms
+Ctrl+b
+o
+Sleep 800ms
+
+Down
+Sleep 600ms
 Type "a"
-Sleep 2000ms
+Sleep 3000ms
