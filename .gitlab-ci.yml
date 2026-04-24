@@ -1,9 +1,8 @@
 pages:
-  stage: deploy
   script:
-    - echo "Deploying static site to GitLab Pages"
+    - echo "Deploying static site"
   artifacts:
     paths:
       - public
-  rules:
-    - if: $CI_COMMIT_BRANCH == "main"
+  only:
+    - main
