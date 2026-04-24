@@ -1,6 +1,6 @@
 use anyhow::Result;
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers},
+    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers, MouseButton, MouseEventKind},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -133,11 +133,7 @@ async fn sync_state(state: &mut AppState) -> Result<bool> {
     let new_panes: std::collections::HashSet<String> = state.panes.keys().cloned().collect();
     let changed = old_panes != new_panes;
 
-    let mut current_list = state.get_flat_list(&state.focus.nav_mode);
-    if current_list.is_empty() && state.focus.nav_mode != crate::state::NavMode::Session {
-        state.focus.nav_mode = crate::state::NavMode::Session;
-        current_list = state.get_flat_list(&state.focus.nav_mode);
-    }
+    let current_list = state.get_dynamic_visible_items();
 
     if let Some(sel) = &state.focus.selected_id {
         if !current_list.contains(sel) {
@@ -239,6 +235,105 @@ async fn main() -> Result<()> {
     }
 }
 
+fn encode_mouse(mouse: &crossterm::event::MouseEvent, x_offset: u16, y_offset: u16) -> Option<Vec<u8>> {
+    use crossterm::event::{MouseButton, MouseEventKind};
+
+    let col = mouse.column.saturating_sub(x_offset) + 1;
+    let row = mouse.row.saturating_sub(y_offset) + 1;
+
+    let (base_button, release) = match mouse.kind {
+        MouseEventKind::Down(btn) => (match btn {
+            MouseButton::Left => 0u32,
+            MouseButton::Middle => 1,
+            MouseButton::Right => 2,
+        }, false),
+        MouseEventKind::Up(btn) => (match btn {
+            MouseButton::Left => 0u32,
+            MouseButton::Middle => 1,
+            MouseButton::Right => 2,
+        }, true),
+        MouseEventKind::Drag(btn) => (match btn {
+            MouseButton::Left => 32u32,
+            MouseButton::Middle => 33,
+            MouseButton::Right => 34,
+        }, false),
+        MouseEventKind::Moved => (35, false),
+        MouseEventKind::ScrollUp => (64, false),
+        MouseEventKind::ScrollDown => (65, false),
+        _ => return None,
+    };
+
+    let mut button = base_button;
+    if mouse.modifiers.contains(crossterm::event::KeyModifiers::SHIFT) { button += 4; }
+    if mouse.modifiers.contains(crossterm::event::KeyModifiers::ALT)   { button += 8; }
+    if mouse.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) { button += 16; }
+
+    let suffix = if release { 'm' } else { 'M' };
+    Some(format!("\x1b[<{};{};{}{}", button, col, row, suffix).into_bytes())
+}
+
+fn encode_key(key: &crossterm::event::KeyEvent, bytes: &mut Vec<u8>) {
+    use crossterm::event::KeyCode;
+    match key.code {
+        KeyCode::Char(c) => {
+            if key.modifiers.contains(KeyModifiers::CONTROL) {
+                if c >= 'a' && c <= 'z' {
+                    bytes.push(c as u8 - b'a' + 1);
+                } else if (b'@'..=b'_').contains(&(c as u8)) {
+                    bytes.push(c as u8 - b'@');
+                } else if c == ' ' {
+                    bytes.push(0);
+                }
+            } else if key.modifiers.contains(KeyModifiers::ALT) {
+                bytes.push(27);
+                bytes.extend_from_slice(c.to_string().as_bytes());
+            } else {
+                bytes.extend_from_slice(c.to_string().as_bytes());
+            }
+        }
+        KeyCode::Enter => bytes.push(b'\r'),
+        KeyCode::Esc => bytes.push(27),
+        KeyCode::Backspace => {
+            if key.modifiers.contains(KeyModifiers::ALT) {
+                bytes.push(27);
+            }
+            bytes.push(127);
+        }
+        KeyCode::Tab => bytes.push(b'\t'),
+        KeyCode::Up => {
+            if key.modifiers.contains(KeyModifiers::ALT) { bytes.extend_from_slice(b"\x1b[1;3A"); }
+            else { bytes.extend_from_slice(b"\x1b[A"); }
+        }
+        KeyCode::Down => {
+            if key.modifiers.contains(KeyModifiers::ALT) { bytes.extend_from_slice(b"\x1b[1;3B"); }
+            else { bytes.extend_from_slice(b"\x1b[B"); }
+        }
+        KeyCode::Right => {
+            if key.modifiers.contains(KeyModifiers::ALT) { bytes.extend_from_slice(b"\x1b[1;3C"); }
+            else { bytes.extend_from_slice(b"\x1b[C"); }
+        }
+        KeyCode::Left => {
+            if key.modifiers.contains(KeyModifiers::ALT) { bytes.extend_from_slice(b"\x1b[1;3D"); }
+            else { bytes.extend_from_slice(b"\x1b[D"); }
+        }
+        KeyCode::Home => bytes.extend_from_slice(b"\x1b[H"),
+        KeyCode::End => bytes.extend_from_slice(b"\x1b[F"),
+        KeyCode::PageUp => bytes.extend_from_slice(b"\x1b[5~"),
+        KeyCode::PageDown => bytes.extend_from_slice(b"\x1b[6~"),
+        KeyCode::Delete => bytes.extend_from_slice(b"\x1b[3~"),
+        KeyCode::F(n) => {
+            let s = match n {
+                1 => "\x1bOP", 2 => "\x1bOQ", 3 => "\x1bOR", 4 => "\x1bOS",
+                5 => "\x1b[15~", 6 => "\x1b[17~", 7 => "\x1b[18~", 8 => "\x1b[19~",
+                9 => "\x1b[20~", 10 => "\x1b[21~", 11 => "\x1b[23~", 12 => "\x1b[24~",
+                _ => "",
+            };
+            bytes.extend_from_slice(s.as_bytes());
+        }
+        _ => {}
+    }
+}
+
 async fn run_app(state: &mut AppState) -> Result<()> {
     let last_error: Option<String> = None;
     let mut active_terminal: Option<EmbeddedTerminal> = None;
@@ -262,21 +357,75 @@ async fn run_app(state: &mut AppState) -> Result<()> {
     let _ = sync_state(state).await;
 
     let mut last_terminal_size = terminal.size().unwrap_or(ratatui::layout::Size::new(80, 24));
+    let mut last_sidebar_cols: u16 = 0;
+    let mut dragging_separator = false;
+    let mut prefix_pending = false;
     let mut current_switch_task: Option<tokio::task::JoinHandle<()>> = None;
 
     loop {
         if tokio::time::Instant::now() > last_sync_update + Duration::from_millis(200) {
             let _ = sync_state(state).await;
             last_sync_update = tokio::time::Instant::now();
+
+            // In preview mode, sync tree selection to whichever session the embedded client is on
+            if state.focus.panel == Panel::Preview {
+                if let Some(term) = &active_terminal {
+                    if let Some(pid) = term.pty_pid {
+                        if let Ok(output) = tokio::process::Command::new("tmux")
+                            .args(["list-clients", "-F", "#{client_pid} #{session_id} #{pane_id}"])
+                            .output()
+                            .await
+                        {
+                            let stdout = String::from_utf8_lossy(&output.stdout);
+                            for line in stdout.lines() {
+                                let parts: Vec<&str> = line.split_whitespace().collect();
+                                if parts.len() == 3 && parts[0] == pid.to_string() {
+                                    let current_session = parts[1].to_string();
+                                    let current_pane = parts[2].to_string();
+                                    let visible = state.get_dynamic_visible_items();
+                                    // Prefer exact pane match; fall back to first item in session
+                                    let target = if visible.contains(&current_pane) {
+                                        Some(current_pane)
+                                    } else {
+                                        visible.into_iter().find(|id| {
+                                            if id == &current_session { return true; }
+                                            if let Some(w) = state.windows.get(id) {
+                                                return w.session_id == current_session;
+                                            }
+                                            if let Some(p) = state.panes.get(id) {
+                                                return state.windows.get(&p.window_id)
+                                                    .map(|w| w.session_id == current_session)
+                                                    .unwrap_or(false);
+                                            }
+                                            false
+                                        })
+                                    };
+                                    if let Some(id) = target {
+                                        if state.focus.selected_id.as_deref() != Some(&id) {
+                                            state.focus.selected_id = Some(id);
+                                        }
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         let current_size = terminal.size().unwrap_or(last_terminal_size);
-        if current_size != last_terminal_size {
+
+        // Initialize sidebar_cols from default percentage if not yet set
+        if state.sidebar_cols == 0 {
+            state.sidebar_cols = ((current_size.width as f32 * 0.28) as u16).max(8);
+        }
+
+        let sidebar_changed = state.sidebar_cols != last_sidebar_cols;
+        if current_size != last_terminal_size || sidebar_changed {
             if let Some(term) = &mut active_terminal {
-                let sidebar_width = (current_size.width as f32 * 0.28) as u16;
-                let cols = current_size.width.saturating_sub(sidebar_width).saturating_sub(2);
-                let rows = current_size.height.saturating_sub(4);
-                
+                let cols = current_size.width.saturating_sub(state.sidebar_cols);
+                let rows = current_size.height.saturating_sub(1);
                 if cols > 0 && rows > 0 {
                     if let Ok(master) = term.pty_master.lock() {
                         let _ = master.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
@@ -284,6 +433,7 @@ async fn run_app(state: &mut AppState) -> Result<()> {
                 }
             }
             last_terminal_size = current_size;
+            last_sidebar_cols = state.sidebar_cols;
         }
 
         if state.focus.selected_id != last_selected_id {
@@ -324,9 +474,8 @@ async fn run_app(state: &mut AppState) -> Result<()> {
                         }));
                     }
                 } else {
-                    let sidebar_width = (current_size.width as f32 * 0.28) as u16;
-                    let cols = current_size.width.saturating_sub(sidebar_width).saturating_sub(2);
-                    let rows = current_size.height.saturating_sub(4);
+                    let cols = current_size.width.saturating_sub(state.sidebar_cols);
+                    let rows = current_size.height.saturating_sub(1);
 
                     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
                     let parser = Arc::new(RwLock::new(vt100::Parser::new(rows, cols, 0)));
@@ -413,7 +562,140 @@ async fn run_app(state: &mut AppState) -> Result<()> {
         })?;
 
         if event::poll(Duration::from_millis(50))? {
-            if let Event::Key(key) = event::read()? {
+            let ev = event::read()?;
+
+            // Mouse handling: separator drag takes priority, then preview passthrough
+            if let Event::Mouse(mouse) = ev {
+                let sep_col = state.sidebar_cols.saturating_sub(1);
+                let near_separator = (mouse.column as i32 - sep_col as i32).unsigned_abs() <= 1;
+
+                match mouse.kind {
+                    MouseEventKind::Down(MouseButton::Left) if near_separator => {
+                        dragging_separator = true;
+                        continue;
+                    }
+                    MouseEventKind::Drag(MouseButton::Left) if dragging_separator => {
+                        let min_cols = 8u16;
+                        let max_cols = current_size.width.saturating_sub(20);
+                        state.sidebar_cols = (mouse.column + 1).max(min_cols).min(max_cols);
+                        state.save_to_disk();
+                        continue;
+                    }
+                    MouseEventKind::Up(MouseButton::Left) if dragging_separator => {
+                        dragging_separator = false;
+                        continue;
+                    }
+                    _ => {}
+                }
+
+                // Sidebar: click to select, scroll to navigate (works in both Tree and Preview panels)
+                if mouse.column < state.sidebar_cols {
+                    const TREE_Y_START: u16 = 1; // block title row
+                    match mouse.kind {
+                        MouseEventKind::Down(MouseButton::Left) => {
+                            if mouse.row >= TREE_Y_START && mouse.row < current_size.height.saturating_sub(1) {
+                                let relative_row = (mouse.row - TREE_Y_START) as usize;
+                                let logical_idx = relative_row + state.focus.scroll_offset;
+                                let visible = state.get_dynamic_visible_items();
+                                if let Some(id) = visible.get(logical_idx) {
+                                    state.focus.selected_id = Some(id.clone());
+                                    state.save_to_disk();
+                                }
+                            }
+                        }
+                        MouseEventKind::ScrollUp => {
+                            state.move_selection_up();
+                            state.save_to_disk();
+                        }
+                        MouseEventKind::ScrollDown => {
+                            state.move_selection_down();
+                            state.save_to_disk();
+                        }
+                        _ => {}
+                    }
+                }
+
+                // Forward mouse events to the embedded terminal whenever the cursor is in the preview area
+                if let Some(term) = &active_terminal {
+                    if mouse.column >= state.sidebar_cols {
+                        let x_offset = state.sidebar_cols;
+                        let y_offset = 0u16;
+                        if let Some(bytes) = encode_mouse(&mouse, x_offset, y_offset) {
+                            let _ = term.pty_writer.send(bytes);
+                        }
+                    }
+                }
+
+                continue;
+            }
+
+            if let Event::Key(key) = ev {
+                // Rename mode intercepts all input
+                if let crate::state::InputMode::Renaming { .. } = &state.input_mode {
+                    match key.code {
+                        KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            if let crate::state::InputMode::Renaming { input, .. } = &mut state.input_mode {
+                                input.push(c);
+                            }
+                        }
+                        KeyCode::Backspace => {
+                            if let crate::state::InputMode::Renaming { input, .. } = &mut state.input_mode {
+                                input.pop();
+                            }
+                        }
+                        KeyCode::Enter => {
+                            if let crate::state::InputMode::Renaming { session_id, input } = state.input_mode.clone() {
+                                let trimmed = input.trim().to_string();
+                                if !trimmed.is_empty() {
+                                    let _ = tokio::process::Command::new("tmux")
+                                        .args(["rename-session", "-t", &session_id, &trimmed])
+                                        .output()
+                                        .await;
+                                }
+                            }
+                            state.input_mode = crate::state::InputMode::TuiNormal;
+                        }
+                        KeyCode::Esc => {
+                            state.input_mode = crate::state::InputMode::TuiNormal;
+                        }
+                        _ => {}
+                    }
+                    continue;
+                }
+
+                // New session mode intercepts all input
+                if let crate::state::InputMode::NewSession { .. } = &state.input_mode {
+                    match key.code {
+                        KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            if let crate::state::InputMode::NewSession { input } = &mut state.input_mode {
+                                input.push(c);
+                            }
+                        }
+                        KeyCode::Backspace => {
+                            if let crate::state::InputMode::NewSession { input } = &mut state.input_mode {
+                                input.pop();
+                            }
+                        }
+                        KeyCode::Enter => {
+                            if let crate::state::InputMode::NewSession { input } = state.input_mode.clone() {
+                                let trimmed = input.trim().to_string();
+                                if !trimmed.is_empty() {
+                                    let _ = tokio::process::Command::new("tmux")
+                                        .args(["new-session", "-d", "-s", &trimmed])
+                                        .output()
+                                        .await;
+                                }
+                            }
+                            state.input_mode = crate::state::InputMode::TuiNormal;
+                        }
+                        KeyCode::Esc => {
+                            state.input_mode = crate::state::InputMode::TuiNormal;
+                        }
+                        _ => {}
+                    }
+                    continue;
+                }
+
                 if key.code == KeyCode::Char('p') && key.modifiers.contains(KeyModifiers::CONTROL) {
                     state.focus.panel = match state.focus.panel {
                         Panel::Tree => Panel::Preview,
@@ -458,6 +740,9 @@ async fn run_app(state: &mut AppState) -> Result<()> {
                             state.show_help = true;
                         }
                         KeyCode::Enter => {
+                            state.focus.panel = Panel::Preview;
+                        }
+                        KeyCode::Char('a') => {
                             if let Some(sel) = &state.focus.selected_id {
                                 state.last_target_id = Some(sel.clone());
                                 state.save_to_disk();
@@ -485,61 +770,53 @@ async fn run_app(state: &mut AppState) -> Result<()> {
                             state.toggle_expansion();
                             state.save_to_disk();
                         }
+                        KeyCode::Char('n') => {
+                            state.input_mode = crate::state::InputMode::NewSession {
+                                input: String::new(),
+                            };
+                        }
+                        KeyCode::Char('r') => {
+                            let session_id = state.focus.selected_id.as_ref().and_then(|sel| {
+                                if state.sessions.contains_key(sel) {
+                                    Some(sel.clone())
+                                } else if let Some(w) = state.windows.get(sel) {
+                                    Some(w.session_id.clone())
+                                } else if let Some(p) = state.panes.get(sel) {
+                                    state.windows.get(&p.window_id).map(|w| w.session_id.clone())
+                                } else {
+                                    None
+                                }
+                            });
+                            if let Some(sid) = session_id {
+                                let current_name = state.sessions.get(&sid)
+                                    .map(|s| s.name.clone())
+                                    .unwrap_or_default();
+                                state.input_mode = crate::state::InputMode::Renaming {
+                                    session_id: sid,
+                                    input: current_name,
+                                };
+                            }
+                        }
                         _ => {}
                     }
                 } else if state.focus.panel == Panel::Preview {
-                    if let Some(term) = &active_terminal {
-                        let mut bytes = Vec::new();
-                        match key.code {
-                            KeyCode::Char(c) => {
-                                if key.modifiers.contains(KeyModifiers::CONTROL) {
-                                    if c >= 'a' && c <= 'z' {
-                                        bytes.push(c as u8 - b'a' + 1);
-                                    } else if (b'@'..=b'_').contains(&(c as u8)) {
-                                        bytes.push(c as u8 - b'@');
-                                    } else if c == ' ' {
-                                        bytes.push(0);
-                                    }
-                                } else if key.modifiers.contains(KeyModifiers::ALT) {
-                                    bytes.push(27);
-                                    bytes.extend_from_slice(c.to_string().as_bytes());
-                                } else {
-                                    bytes.extend_from_slice(c.to_string().as_bytes());
-                                }
+                    if prefix_pending {
+                        prefix_pending = false;
+                        if key.code == KeyCode::Char('d') && !key.modifiers.contains(KeyModifiers::CONTROL) {
+                            state.focus.panel = Panel::Tree;
+                        } else if let Some(term) = &active_terminal {
+                            // Forward the swallowed Ctrl+B and then this key
+                            let mut bytes = vec![0x02u8];
+                            encode_key(&key, &mut bytes);
+                            if !bytes.is_empty() {
+                                let _ = term.pty_writer.send(bytes);
                             }
-                            KeyCode::Enter => bytes.push(b'\r'),
-                            KeyCode::Esc => bytes.push(27),
-                            KeyCode::Backspace => bytes.push(127),
-                            KeyCode::Tab => bytes.push(b'\t'),
-                            KeyCode::Up => bytes.extend_from_slice(b"\x1b[A"),
-                            KeyCode::Down => bytes.extend_from_slice(b"\x1b[B"),
-                            KeyCode::Right => bytes.extend_from_slice(b"\x1b[C"),
-                            KeyCode::Left => bytes.extend_from_slice(b"\x1b[D"),
-                            KeyCode::Home => bytes.extend_from_slice(b"\x1b[H"),
-                            KeyCode::End => bytes.extend_from_slice(b"\x1b[F"),
-                            KeyCode::PageUp => bytes.extend_from_slice(b"\x1b[5~"),
-                            KeyCode::PageDown => bytes.extend_from_slice(b"\x1b[6~"),
-                            KeyCode::Delete => bytes.extend_from_slice(b"\x1b[3~"),
-                            KeyCode::F(n) => {
-                                let s = match n {
-                                    1 => "\x1bOP",
-                                    2 => "\x1bOQ",
-                                    3 => "\x1bOR",
-                                    4 => "\x1bOS",
-                                    5 => "\x1b[15~",
-                                    6 => "\x1b[17~",
-                                    7 => "\x1b[18~",
-                                    8 => "\x1b[19~",
-                                    9 => "\x1b[20~",
-                                    10 => "\x1b[21~",
-                                    11 => "\x1b[23~",
-                                    12 => "\x1b[24~",
-                                    _ => "",
-                                };
-                                bytes.extend_from_slice(s.as_bytes());
-                            }
-                            _ => {}
                         }
+                    } else if key.code == KeyCode::Char('b') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                        prefix_pending = true;
+                    } else if let Some(term) = &active_terminal {
+                        let mut bytes = Vec::new();
+                        encode_key(&key, &mut bytes);
                         if !bytes.is_empty() {
                             let _ = term.pty_writer.send(bytes);
                         }

@@ -17,12 +17,15 @@ pub struct AppState {
     pub show_help: bool,
     pub expanded_ids: HashSet<String>,
     pub last_target_id: Option<String>,
+    pub sidebar_cols: u16,
 }
 
 #[derive(Serialize, Deserialize)]
 pub struct PersistentState {
     pub focus: Focus,
     pub expanded_ids: Vec<String>,
+    #[serde(default)]
+    pub sidebar_cols: u16,
 }
 
 impl Default for AppState {
@@ -36,6 +39,7 @@ impl Default for AppState {
             show_help: false,
             expanded_ids: HashSet::new(),
             last_target_id: None,
+            sidebar_cols: 0,
         }
     }
 }
@@ -58,6 +62,7 @@ impl AppState {
             let persistent = PersistentState {
                 focus: self.focus.clone(),
                 expanded_ids,
+                sidebar_cols: self.sidebar_cols,
             };
             
             if let Ok(toml) = toml::to_string(&persistent) {
@@ -74,31 +79,62 @@ impl AppState {
                 if let Ok(persistent) = toml::from_str::<PersistentState>(&content) {
                     state.focus = persistent.focus;
                     state.expanded_ids = persistent.expanded_ids.into_iter().collect();
+                    state.sidebar_cols = persistent.sidebar_cols;
                 }
             }
         }
         state
     }
 
-    pub fn get_flat_list(&self, mode: &NavMode) -> Vec<String> {
+    pub fn get_dynamic_visible_items(&self) -> Vec<String> {
         let mut list = Vec::new();
         for session in self.sessions.values() {
-            if mode == &NavMode::Session {
+            let num_windows = session.windows.len();
+            let total_panes: usize = session.windows.iter()
+                .filter_map(|wid| self.windows.get(wid))
+                .map(|w| w.panes.len())
+                .sum();
+
+            if num_windows <= 1 && total_panes <= 1 {
+                // Single leaf: use pane ID (or session ID if no panes yet)
+                let leaf_id = session.windows.first()
+                    .and_then(|wid| self.windows.get(wid))
+                    .and_then(|w| w.panes.first())
+                    .cloned()
+                    .unwrap_or(session.id.clone());
+                list.push(leaf_id);
+            } else if num_windows == 1 {
+                // Session header + panes directly (window level skipped)
                 list.push(session.id.clone());
-            } else {
-                if !session.expanded {
-                    continue;
+                if session.expanded {
+                    if let Some(window) = session.windows.first()
+                        .and_then(|wid| self.windows.get(wid))
+                    {
+                        for pid in &window.panes {
+                            list.push(pid.clone());
+                        }
+                    }
                 }
-                for window_id in &session.windows {
-                    if mode == &NavMode::Window {
-                        list.push(window_id.clone());
-                    } else if mode == &NavMode::Pane {
-                        if let Some(window) = self.windows.get(window_id) {
-                            if !window.expanded {
-                                continue;
-                            }
-                            for pane_id in &window.panes {
-                                list.push(pane_id.clone());
+            } else {
+                // Full hierarchy
+                list.push(session.id.clone());
+                if session.expanded {
+                    for wid in &session.windows {
+                        if let Some(window) = self.windows.get(wid) {
+                            if window.panes.len() <= 1 {
+                                // Window leaf: use pane ID
+                                let leaf_id = window.panes.first()
+                                    .cloned()
+                                    .unwrap_or(wid.clone());
+                                list.push(leaf_id);
+                            } else {
+                                // Window header
+                                list.push(wid.clone());
+                                if window.expanded {
+                                    for pid in &window.panes {
+                                        list.push(pid.clone());
+                                    }
+                                }
                             }
                         }
                     }
@@ -108,12 +144,15 @@ impl AppState {
         list
     }
 
+    pub fn get_flat_list(&self, _mode: &NavMode) -> Vec<String> {
+        self.get_dynamic_visible_items()
+    }
+
     pub fn move_selection_up(&mut self) {
-        let list = self.get_flat_list(&self.focus.nav_mode);
+        let list = self.get_dynamic_visible_items();
         if list.is_empty() {
             return;
         }
-
         if let Some(sel) = &self.focus.selected_id {
             if let Some(pos) = list.iter().position(|x| x == sel) {
                 if pos > 0 {
@@ -122,17 +161,14 @@ impl AppState {
                 return;
             }
         }
-
-        // If nothing selected or selection not in list, pick the last one for "up"
         self.focus.selected_id = Some(list.last().unwrap().clone());
     }
 
     pub fn move_selection_down(&mut self) {
-        let list = self.get_flat_list(&self.focus.nav_mode);
+        let list = self.get_dynamic_visible_items();
         if list.is_empty() {
             return;
         }
-
         if let Some(sel) = &self.focus.selected_id {
             if let Some(pos) = list.iter().position(|x| x == sel) {
                 if pos + 1 < list.len() {
@@ -141,71 +177,136 @@ impl AppState {
                 return;
             }
         }
-
-        // If nothing selected or selection not in list, pick the first one
         self.focus.selected_id = Some(list[0].clone());
     }
 
+    // LEFT: collapse the selected node, or select parent if already collapsed / is a pane
     pub fn switch_nav_left(&mut self) {
-        match self.focus.nav_mode {
-            NavMode::Pane => {
-                self.focus.nav_mode = NavMode::Window;
-                if let Some(sel) = &self.focus.selected_id {
-                    if let Some(pane) = self.panes.get(sel) {
-                        self.focus.selected_id = Some(pane.window_id.clone());
-                    }
-                }
+        let sel = match self.focus.selected_id.clone() {
+            Some(s) => s,
+            None => return,
+        };
+
+        if let Some(session) = self.sessions.get_mut(&sel) {
+            if session.expanded {
+                session.expanded = false;
             }
-            NavMode::Window => {
-                self.focus.nav_mode = NavMode::Session;
-                if let Some(sel) = &self.focus.selected_id {
-                    if let Some(window) = self.windows.get(sel) {
-                        self.focus.selected_id = Some(window.session_id.clone());
-                    }
-                }
-            }
-            NavMode::Session => {}
+            return;
         }
-        self.ensure_selected_expanded();
+
+        if let Some(window) = self.windows.get_mut(&sel) {
+            if window.expanded {
+                window.expanded = false;
+            } else {
+                let sid = window.session_id.clone();
+                self.focus.selected_id = Some(sid);
+            }
+            return;
+        }
+
+        if let Some(pane) = self.panes.get(&sel).cloned() {
+            let wid = pane.window_id.clone();
+            if let Some(window) = self.windows.get(&wid) {
+                let sid = window.session_id.clone();
+                let num_windows = self.sessions.get(&sid).map(|s| s.windows.len()).unwrap_or(0);
+                if window.panes.len() > 1 {
+                    // Parent is a window header
+                    self.focus.selected_id = Some(wid);
+                    if let Some(w) = self.windows.get_mut(&pane.window_id) {
+                        w.expanded = false;
+                    }
+                } else if num_windows > 1 {
+                    // Parent is a session header (window was a leaf)
+                    self.focus.selected_id = Some(sid);
+                } else {
+                    // Single-window session with multiple panes — parent is session header
+                    self.focus.selected_id = Some(sid);
+                    if let Some(s) = self.sessions.get_mut(&window.session_id.clone()) {
+                        s.expanded = false;
+                    }
+                }
+            }
+        }
     }
 
+    // RIGHT: expand the selected node, or descend to first child if already expanded
     pub fn switch_nav_right(&mut self) {
-        match self.focus.nav_mode {
-            NavMode::Session => {
-                self.focus.nav_mode = NavMode::Window;
-                if let Some(sel) = &self.focus.selected_id {
-                    if let Some(session) = self.sessions.get(sel) {
-                        if !session.windows.is_empty() {
-                            self.focus.selected_id = Some(session.windows[0].clone());
-                        }
-                    }
+        let sel = match self.focus.selected_id.clone() {
+            Some(s) => s,
+            None => return,
+        };
+
+        if self.sessions.contains_key(&sel) {
+            let (can_expand, already_expanded) = {
+                let s = self.sessions.get(&sel).unwrap();
+                let num_windows = s.windows.len();
+                let total_panes: usize = s.windows.iter()
+                    .filter_map(|wid| self.windows.get(wid))
+                    .map(|w| w.panes.len())
+                    .sum();
+                (num_windows > 1 || total_panes > 1, s.expanded)
+            };
+            if !can_expand {
+                return;
+            }
+            if !already_expanded {
+                self.sessions.get_mut(&sel).unwrap().expanded = true;
+                return;
+            }
+            // Already expanded — move to first child
+            let list = self.get_dynamic_visible_items();
+            if let Some(pos) = list.iter().position(|x| x == &sel) {
+                if pos + 1 < list.len() {
+                    self.focus.selected_id = Some(list[pos + 1].clone());
                 }
             }
-            NavMode::Window => {
-                self.focus.nav_mode = NavMode::Pane;
-                if let Some(sel) = &self.focus.selected_id {
-                    if let Some(window) = self.windows.get(sel) {
-                        if !window.panes.is_empty() {
-                            self.focus.selected_id = Some(window.panes[0].clone());
-                        }
-                    }
-                }
-            }
-            NavMode::Pane => {}
+            return;
         }
-        self.ensure_selected_expanded();
+
+        if self.windows.contains_key(&sel) {
+            let (can_expand, already_expanded) = {
+                let w = self.windows.get(&sel).unwrap();
+                (w.panes.len() > 1, w.expanded)
+            };
+            if !can_expand {
+                return;
+            }
+            if !already_expanded {
+                self.windows.get_mut(&sel).unwrap().expanded = true;
+                return;
+            }
+            // Already expanded — move to first pane
+            if let Some(pid) = self.windows.get(&sel).and_then(|w| w.panes.first()).cloned() {
+                self.focus.selected_id = Some(pid);
+            }
+        }
+        // Panes are leaves — nothing to expand
     }
 
     fn ensure_selected_expanded(&mut self) {
-        if let Some(sel) = &self.focus.selected_id {
-            if let Some(window) = self.windows.get(sel) {
-                if let Some(session) = self.sessions.get_mut(&window.session_id) {
-                    session.expanded = true;
-                }
-            } else if let Some(pane) = self.panes.get(sel) {
-                if let Some(window) = self.windows.get_mut(&pane.window_id) {
+        let sel = match self.focus.selected_id.clone() {
+            Some(s) => s,
+            None => return,
+        };
+
+        if let Some(window) = self.windows.get(&sel).cloned() {
+            if let Some(session) = self.sessions.get_mut(&window.session_id) {
+                session.expanded = true;
+            }
+        } else if let Some(pane) = self.panes.get(&sel).cloned() {
+            let wid = pane.window_id.clone();
+            if let Some(window) = self.windows.get_mut(&wid) {
+                if window.panes.len() > 1 {
                     window.expanded = true;
-                    if let Some(session) = self.sessions.get_mut(&window.session_id) {
+                }
+                let sid = window.session_id.clone();
+                if let Some(session) = self.sessions.get_mut(&sid) {
+                    let num_windows = session.windows.len();
+                    let total_panes: usize = session.windows.iter()
+                        .filter_map(|wid2| self.windows.get(wid2))
+                        .map(|w| w.panes.len())
+                        .sum();
+                    if num_windows > 1 || total_panes > 1 {
                         session.expanded = true;
                     }
                 }
@@ -279,6 +380,8 @@ pub struct Pane {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum InputMode {
     TuiNormal,
+    Renaming { session_id: SessionId, input: String },
+    NewSession { input: String },
     #[allow(dead_code)]
     PtyPassthrough { pane_id: PaneId },
     #[allow(dead_code)]
@@ -299,23 +402,7 @@ pub struct Focus {
 
 impl AppState {
     pub fn get_visible_list(&self) -> Vec<String> {
-        let mut list = Vec::new();
-        for session in self.sessions.values() {
-            list.push(session.id.clone());
-            if session.expanded {
-                for window_id in &session.windows {
-                    list.push(window_id.clone());
-                    if let Some(window) = self.windows.get(window_id) {
-                        if window.expanded {
-                            for pane_id in &window.panes {
-                                list.push(pane_id.clone());
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        list
+        self.get_dynamic_visible_items()
     }
 
     pub fn update_scroll(&mut self, height: usize) {
