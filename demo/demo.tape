@@ -9,14 +9,12 @@ Set Padding 0
 Set TypingSpeed 80ms
 
 # ── Hidden setup: isolated demo environment on ttree-demo socket ──────────────
-# Uses -L ttree-demo throughout so the user's real tmux sessions are untouched.
 Hide
 
 Type "tmux -L ttree-demo kill-server 2>/dev/null; true"
 Enter
 Sleep 1s
 
-# Demo session: work (vim open)
 Type "tmux -L ttree-demo new-session -d -s work -x 140 -y 33"
 Enter
 Sleep 100ms
@@ -24,7 +22,6 @@ Type "tmux -L ttree-demo send-keys -t work 'vim src/main.rs' Enter"
 Enter
 Sleep 200ms
 
-# Demo session: monitoring (htop)
 Type "tmux -L ttree-demo new-session -d -s monitoring -x 140 -y 33"
 Enter
 Sleep 100ms
@@ -32,7 +29,6 @@ Type "tmux -L ttree-demo send-keys -t monitoring 'htop' Enter"
 Enter
 Sleep 200ms
 
-# Demo session: build (cargo running)
 Type "tmux -L ttree-demo new-session -d -s build -x 140 -y 33"
 Enter
 Sleep 100ms
@@ -40,7 +36,6 @@ Type "tmux -L ttree-demo send-keys -t build 'cargo build --release' Enter"
 Enter
 Sleep 300ms
 
-# Demo session: agents (3 windows, shows hierarchy)
 Type "tmux -L ttree-demo new-session -d -s agents -x 140 -y 33"
 Enter
 Type "tmux -L ttree-demo new-window -t agents"
@@ -55,25 +50,34 @@ Type "tmux -L ttree-demo send-keys -t agents:2 'echo [agent-3] idle' Enter"
 Enter
 Sleep 300ms
 
-# Display session: split layout (top: ttree, bottom: 4-line description bar)
 Type "tmux -L ttree-demo new-session -d -s ttree -x 140 -y 37"
 Enter
 Sleep 100ms
 Type "tmux -L ttree-demo split-window -v -l 4 -t ttree:0"
 Enter
 Sleep 100ms
-
-# Pre-seed the description pane
-Type "tmux -L ttree-demo send-keys -t ttree:0.1 'cd ~/Projects/ttree/demo && ./desc.sh \"ttree\" \"a live tmux session manager — tree navigation with embedded pane preview\"' Enter"
+Type "tmux -L ttree-demo send-keys -t ttree:0.1 'cd ~/Projects/ttree/demo && clear' Enter"
 Enter
-Sleep 400ms
+Sleep 200ms
 
-# Attach — TMUX will be set to the ttree-demo socket, so ttree only sees demo sessions
 Type "tmux -L ttree-demo attach-session -t ttree"
 Enter
 Sleep 1500ms
 
 Show
+
+# ── Startup description ───────────────────────────────────────────────────────
+Ctrl+b
+o
+Sleep 200ms
+Set TypingSpeed 0ms
+Type './desc.sh "ttree" "a live tmux session manager — tree navigation with embedded pane preview"'
+Enter
+Set TypingSpeed 80ms
+Sleep 200ms
+Ctrl+b
+o
+Sleep 500ms
 
 # ══════════════════════════════════════════════════════════════════════════════
 # SECTION 1 — Launch
@@ -91,7 +95,7 @@ Ctrl+b
 o
 Sleep 300ms
 Set TypingSpeed 0ms
-Type "./desc.sh \"Tree navigation\" \"j / k  to move up and down  ·  Space to expand or collapse\""
+Type './desc.sh "Tree navigation" "j / k  to move up and down  ·  Space to expand or collapse"'
 Enter
 Set TypingSpeed 80ms
 Sleep 300ms
@@ -118,7 +122,7 @@ Ctrl+b
 o
 Sleep 300ms
 Set TypingSpeed 0ms
-Type "./desc.sh \"Expand / collapse\" \"the agents session has 3 windows — press Space to reveal them\""
+Type './desc.sh "Expand / collapse" "the agents session has 3 windows — press Space to reveal them"'
 Enter
 Set TypingSpeed 80ms
 Sleep 300ms
@@ -149,7 +153,7 @@ Ctrl+b
 o
 Sleep 300ms
 Set TypingSpeed 0ms
-Type "./desc.sh \"Live pane preview\" \"press Enter to open an embedded terminal showing the active pane in real time\""
+Type './desc.sh "Live pane preview" "press Enter to open an embedded terminal showing the active pane in real time"'
 Enter
 Set TypingSpeed 80ms
 Sleep 300ms
@@ -172,7 +176,7 @@ Ctrl+b
 o
 Sleep 300ms
 Set TypingSpeed 0ms
-Type "./desc.sh \"Session switching\" \"click or navigate the sidebar to switch sessions — preview updates instantly\""
+Type './desc.sh "Session switching" "click or navigate the sidebar to switch sessions — preview updates instantly"'
 Enter
 Set TypingSpeed 80ms
 Sleep 300ms
@@ -198,7 +202,7 @@ Ctrl+b
 o
 Sleep 300ms
 Set TypingSpeed 0ms
-Type "./desc.sh \"New session\" \"press n  to create a session — it appears in the tree immediately\""
+Type './desc.sh "New session" "press n to create a session — it appears in the tree immediately"'
 Enter
 Set TypingSpeed 80ms
 Sleep 300ms
@@ -221,7 +225,7 @@ Ctrl+b
 o
 Sleep 300ms
 Set TypingSpeed 0ms
-Type "./desc.sh \"Rename\" \"press r to rename the selected session inline\""
+Type './desc.sh "Rename" "press r to rename the selected session inline"'
 Enter
 Set TypingSpeed 80ms
 Sleep 300ms
@@ -253,7 +257,7 @@ Ctrl+b
 o
 Sleep 300ms
 Set TypingSpeed 0ms
-Type "./desc.sh \"Attach\" \"press a to detach ttree and attach directly to the selected session\""
+Type './desc.sh "Attach" "press a to detach ttree and attach directly to the selected session"'
 Enter
 Set TypingSpeed 80ms
 Sleep 300ms
