@@ -67,16 +67,14 @@ Sleep 1500ms
 Show
 
 # ── Startup description ───────────────────────────────────────────────────────
-Ctrl+b
-o
+Ctrl+b o
 Sleep 200ms
 Set TypingSpeed 0ms
 Type './desc.sh "ttree" "a live tmux session manager — tree navigation with embedded pane preview"'
 Enter
 Set TypingSpeed 80ms
 Sleep 200ms
-Ctrl+b
-o
+Ctrl+b o
 Sleep 500ms
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -91,16 +89,14 @@ Sleep 3500ms
 # SECTION 2 — Tree navigation
 # ══════════════════════════════════════════════════════════════════════════════
 
-Ctrl+b
-o
+Ctrl+b o
 Sleep 300ms
 Set TypingSpeed 0ms
 Type './desc.sh "Tree navigation" "j / k  to move up and down  ·  Space to expand or collapse"'
 Enter
 Set TypingSpeed 80ms
 Sleep 300ms
-Ctrl+b
-o
+Ctrl+b o
 Sleep 800ms
 
 Down
@@ -118,16 +114,14 @@ Sleep 700ms
 # SECTION 3 — Expand / collapse hierarchy
 # ══════════════════════════════════════════════════════════════════════════════
 
-Ctrl+b
-o
+Ctrl+b o
 Sleep 300ms
 Set TypingSpeed 0ms
 Type './desc.sh "Expand / collapse" "the agents session has 3 windows — press Space to reveal them"'
 Enter
 Set TypingSpeed 80ms
 Sleep 300ms
-Ctrl+b
-o
+Ctrl+b o
 Sleep 800ms
 
 Down
@@ -149,16 +143,14 @@ Sleep 1200ms
 # SECTION 4 — Live preview
 # ══════════════════════════════════════════════════════════════════════════════
 
-Ctrl+b
-o
+Ctrl+b o
 Sleep 300ms
 Set TypingSpeed 0ms
 Type './desc.sh "Live pane preview" "press Enter to open an embedded terminal showing the active pane in real time"'
 Enter
 Set TypingSpeed 80ms
 Sleep 300ms
-Ctrl+b
-o
+Ctrl+b o
 Sleep 800ms
 
 Up
@@ -172,16 +164,14 @@ Sleep 3000ms
 # SECTION 5 — Switch sessions while staying in preview
 # ══════════════════════════════════════════════════════════════════════════════
 
-Ctrl+b
-o
+Ctrl+b o
 Sleep 300ms
 Set TypingSpeed 0ms
 Type './desc.sh "Session switching" "click or navigate the sidebar to switch sessions — preview updates instantly"'
 Enter
 Set TypingSpeed 80ms
 Sleep 300ms
-Ctrl+b
-o
+Ctrl+b o
 Sleep 800ms
 
 Down
@@ -198,16 +188,14 @@ Sleep 1000ms
 # SECTION 6 — New session
 # ══════════════════════════════════════════════════════════════════════════════
 
-Ctrl+b
-o
+Ctrl+b o
 Sleep 300ms
 Set TypingSpeed 0ms
 Type './desc.sh "New session" "press n to create a session — it appears in the tree immediately"'
 Enter
 Set TypingSpeed 80ms
 Sleep 300ms
-Ctrl+b
-o
+Ctrl+b o
 Sleep 800ms
 
 Type "n"
@@ -221,16 +209,14 @@ Sleep 2000ms
 # SECTION 7 — Rename
 # ══════════════════════════════════════════════════════════════════════════════
 
-Ctrl+b
-o
+Ctrl+b o
 Sleep 300ms
 Set TypingSpeed 0ms
 Type './desc.sh "Rename" "press r to rename the selected session inline"'
 Enter
 Set TypingSpeed 80ms
 Sleep 300ms
-Ctrl+b
-o
+Ctrl+b o
 Sleep 800ms
 
 Up
@@ -253,16 +239,14 @@ Sleep 1800ms
 # SECTION 8 — Attach
 # ══════════════════════════════════════════════════════════════════════════════
 
-Ctrl+b
-o
+Ctrl+b o
 Sleep 300ms
 Set TypingSpeed 0ms
 Type './desc.sh "Attach" "press a to detach ttree and attach directly to the selected session"'
 Enter
 Set TypingSpeed 80ms
 Sleep 300ms
-Ctrl+b
-o
+Ctrl+b o
 Sleep 800ms
 
 Down

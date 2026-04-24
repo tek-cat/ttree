@@ -696,11 +696,10 @@ async fn run_app(state: &mut AppState) -> Result<()> {
                     continue;
                 }
 
-                if key.code == KeyCode::Char('p') && key.modifiers.contains(KeyModifiers::CONTROL) {
-                    state.focus.panel = match state.focus.panel {
-                        Panel::Tree => Panel::Preview,
-                        Panel::Preview => Panel::Tree,
-                    };
+                if key.code == KeyCode::Char('p') && key.modifiers.contains(KeyModifiers::CONTROL)
+                    && state.focus.panel == Panel::Tree
+                {
+                    state.focus.panel = Panel::Preview;
                     continue;
                 }
 
