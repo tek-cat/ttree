@@ -8,67 +8,68 @@ Set Theme "Catppuccin Mocha"
 Set Padding 0
 Set TypingSpeed 80ms
 
-# ── Hidden setup: build demo environment ──────────────────────────────────────
+# ── Hidden setup: isolated demo environment on ttree-demo socket ──────────────
+# Uses -L ttree-demo throughout so the user's real tmux sessions are untouched.
 Hide
 
-Type "tmux kill-server 2>/dev/null; true"
+Type "tmux -L ttree-demo kill-server 2>/dev/null; true"
 Enter
 Sleep 1s
 
 # Demo session: work (vim open)
-Type "tmux new-session -d -s work -x 140 -y 33"
+Type "tmux -L ttree-demo new-session -d -s work -x 140 -y 33"
 Enter
 Sleep 100ms
-Type "tmux send-keys -t work 'vim src/main.rs' Enter"
+Type "tmux -L ttree-demo send-keys -t work 'vim src/main.rs' Enter"
 Enter
 Sleep 200ms
 
 # Demo session: monitoring (htop)
-Type "tmux new-session -d -s monitoring -x 140 -y 33"
+Type "tmux -L ttree-demo new-session -d -s monitoring -x 140 -y 33"
 Enter
 Sleep 100ms
-Type "tmux send-keys -t monitoring 'htop' Enter"
+Type "tmux -L ttree-demo send-keys -t monitoring 'htop' Enter"
 Enter
 Sleep 200ms
 
 # Demo session: build (cargo running)
-Type "tmux new-session -d -s build -x 140 -y 33"
+Type "tmux -L ttree-demo new-session -d -s build -x 140 -y 33"
 Enter
 Sleep 100ms
-Type "tmux send-keys -t build 'cargo build --release' Enter"
+Type "tmux -L ttree-demo send-keys -t build 'cargo build --release' Enter"
 Enter
 Sleep 300ms
 
 # Demo session: agents (3 windows, shows hierarchy)
-Type "tmux new-session -d -s agents -x 140 -y 33"
+Type "tmux -L ttree-demo new-session -d -s agents -x 140 -y 33"
 Enter
-Type "tmux new-window -t agents"
+Type "tmux -L ttree-demo new-window -t agents"
 Enter
-Type "tmux new-window -t agents"
+Type "tmux -L ttree-demo new-window -t agents"
 Enter
-Type "tmux send-keys -t agents:0 'echo [agent-1] running' Enter"
+Type "tmux -L ttree-demo send-keys -t agents:0 'echo [agent-1] running' Enter"
 Enter
-Type "tmux send-keys -t agents:1 'echo [agent-2] processing' Enter"
+Type "tmux -L ttree-demo send-keys -t agents:1 'echo [agent-2] processing' Enter"
 Enter
-Type "tmux send-keys -t agents:2 'echo [agent-3] idle' Enter"
+Type "tmux -L ttree-demo send-keys -t agents:2 'echo [agent-3] idle' Enter"
 Enter
 Sleep 300ms
 
 # Display session: split layout (top: ttree, bottom: 4-line description bar)
-Type "tmux new-session -d -s ttree -x 140 -y 37"
+Type "tmux -L ttree-demo new-session -d -s ttree -x 140 -y 37"
 Enter
 Sleep 100ms
-Type "tmux split-window -v -l 4 -t ttree:0"
+Type "tmux -L ttree-demo split-window -v -l 4 -t ttree:0"
 Enter
 Sleep 100ms
 
-# Pre-seed the description pane with the startup message
-Type "tmux send-keys -t ttree:0.1 'cd ~/Projects/ttree/demo && ./desc.sh \"ttree\" \"a live tmux session manager — tree navigation with embedded pane preview\"' Enter"
+# Pre-seed the description pane
+Type "tmux -L ttree-demo send-keys -t ttree:0.1 'cd ~/Projects/ttree/demo && ./desc.sh \"ttree\" \"a live tmux session manager — tree navigation with embedded pane preview\"' Enter"
 Enter
 Sleep 400ms
 
-# Attach
-Type "tmux attach-session -t ttree"
+# Attach — TMUX will be set to the ttree-demo socket, so ttree only sees demo sessions
+Type "tmux -L ttree-demo attach-session -t ttree"
 Enter
 Sleep 1500ms
 
@@ -125,7 +126,6 @@ Ctrl+b
 o
 Sleep 800ms
 
-# Navigate to agents session and expand it
 Down
 Sleep 600ms
 Down
@@ -187,7 +187,6 @@ Sleep 1500ms
 Down
 Sleep 1500ms
 
-# Return to tree mode
 Ctrl+p
 Sleep 1000ms
 
