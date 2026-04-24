@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo check *)",
+      "Bash(cargo clippy *)",
+      "Bash(tmux capture-pane *)",
+      "Bash(tmux list-sessions *)",
+      "Bash(cargo search *)"
+    ]
+  }
+}
