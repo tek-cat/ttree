@@ -15,28 +15,29 @@ Type "tmux -L ttree-demo kill-server 2>/dev/null; true"
 Enter
 Sleep 1s
 
-Type "tmux -L ttree-demo new-session -d -s work -x 140 -y 33"
+# Use plain bash for all demo sessions (avoids p10k / zsh theming)
+Type "tmux -L ttree-demo new-session -d -s work -x 140 -y 33 '/bin/bash --norc --noprofile'"
 Enter
 Sleep 100ms
 Type "tmux -L ttree-demo send-keys -t work 'vim src/main.rs' Enter"
 Enter
 Sleep 200ms
 
-Type "tmux -L ttree-demo new-session -d -s monitoring -x 140 -y 33"
+Type "tmux -L ttree-demo new-session -d -s monitoring -x 140 -y 33 '/bin/bash --norc --noprofile'"
 Enter
 Sleep 100ms
 Type "tmux -L ttree-demo send-keys -t monitoring 'htop' Enter"
 Enter
 Sleep 200ms
 
-Type "tmux -L ttree-demo new-session -d -s build -x 140 -y 33"
+Type "tmux -L ttree-demo new-session -d -s build -x 140 -y 33 '/bin/bash --norc --noprofile'"
 Enter
 Sleep 100ms
 Type "tmux -L ttree-demo send-keys -t build 'cargo build --release' Enter"
 Enter
 Sleep 300ms
 
-Type "tmux -L ttree-demo new-session -d -s agents -x 140 -y 33"
+Type "tmux -L ttree-demo new-session -d -s agents -x 140 -y 33 '/bin/bash --norc --noprofile'"
 Enter
 Type "tmux -L ttree-demo new-window -t agents"
 Enter
@@ -50,7 +51,7 @@ Type "tmux -L ttree-demo send-keys -t agents:2 'echo [agent-3] idle' Enter"
 Enter
 Sleep 300ms
 
-Type "tmux -L ttree-demo new-session -d -s ttree -x 140 -y 37"
+Type "tmux -L ttree-demo new-session -d -s ttree -x 140 -y 37 '/bin/bash --norc --noprofile'"
 Enter
 Sleep 100ms
 Type "tmux -L ttree-demo split-window -v -l 4 -t ttree:0"
