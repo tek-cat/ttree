@@ -1,5 +1,7 @@
 /target
 ttree.log
+/demo/demo.mp4
+/demo/demo.gif
 Cargo.lock
 __pycache__/
 .venv/
