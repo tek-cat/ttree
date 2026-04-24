@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ttree — tmux session manager</title>
+  <style>
+    :root {
+      --bg:       #0d1117;
+      --surface:  #161b22;
+      --border:   #30363d;
+      --green:    #3fb950;
+      --green-dim:#2ea043;
+      --cyan:     #58a6ff;
+      --text:     #e6edf3;
+      --muted:    #8b949e;
+      --yellow:   #d29922;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+      line-height: 1.6;
+    }
+
+    a { color: var(--cyan); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    /* ── Layout ── */
+    header {
+      border-bottom: 1px solid var(--border);
+      padding: 2rem 0;
+    }
+    .container {
+      max-width: 860px;
+      margin: 0 auto;
+      padding: 0 2rem;
+    }
+
+    /* ── Hero ── */
+    .hero { padding: 4rem 0 3rem; }
+
+    .hero h1 {
+      font-size: 3rem;
+      font-weight: 700;
+      color: var(--green);
+      letter-spacing: -0.02em;
+    }
+
+    .hero .tagline {
+      font-size: 1.15rem;
+      color: var(--muted);
+      margin: 0.75rem 0 2rem;
+      max-width: 560px;
+    }
+
+    .badge-row {
+      display: flex;
+      gap: 0.5rem;
+      flex-wrap: wrap;
+      margin-bottom: 2.5rem;
+    }
+
+    .badge {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 0.2rem 0.6rem;
+      font-size: 0.78rem;
+      color: var(--muted);
+    }
+
+    .badge.green { color: var(--green); border-color: var(--green-dim); }
+    .badge.cyan  { color: var(--cyan);  border-color: #1f6feb; }
+
+    /* ── Install block ── */
+    .install-block {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 1rem 1.25rem;
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+      max-width: 520px;
+    }
+
+    .install-block .prompt { color: var(--green); user-select: none; }
+
+    .install-block code {
+      color: var(--text);
+      font-size: 0.9rem;
+      flex: 1;
+    }
+
+    .copy-btn {
+      background: none;
+      border: 1px solid var(--border);
+      color: var(--muted);
+      border-radius: 4px;
+      padding: 0.2rem 0.5rem;
+      cursor: pointer;
+      font-family: inherit;
+      font-size: 0.75rem;
+      white-space: nowrap;
+    }
+    .copy-btn:hover { color: var(--text); border-color: var(--muted); }
+
+    /* ── Demo area ── */
+    .demo-section { padding: 3rem 0; }
+
+    .demo-section h2 {
+      font-size: 1.1rem;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      margin-bottom: 1.25rem;
+    }
+
+    .demo-placeholder {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      aspect-ratio: 16/9;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--muted);
+      font-size: 0.9rem;
+    }
+
+    /* ── Features ── */
+    .features-section { padding: 3rem 0; border-top: 1px solid var(--border); }
+
+    .features-section h2 {
+      font-size: 1.1rem;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      margin-bottom: 1.5rem;
+    }
+
+    .features {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+      gap: 1rem;
+    }
+
+    .feature {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 1rem 1.25rem;
+    }
+
+    .feature .icon { font-size: 1.2rem; margin-bottom: 0.5rem; }
+    .feature h3 { font-size: 0.9rem; color: var(--text); margin-bottom: 0.3rem; }
+    .feature p  { font-size: 0.82rem; color: var(--muted); line-height: 1.5; }
+
+    /* ── Keybindings ── */
+    .keys-section { padding: 3rem 0; border-top: 1px solid var(--border); }
+
+    .keys-section h2 {
+      font-size: 1.1rem;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      margin-bottom: 1.25rem;
+    }
+
+    .key-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.88rem;
+    }
+
+    .key-table td {
+      padding: 0.45rem 0.75rem;
+      border-bottom: 1px solid var(--border);
+      vertical-align: top;
+    }
+
+    .key-table tr:last-child td { border-bottom: none; }
+
+    .key-table .key {
+      color: var(--yellow);
+      white-space: nowrap;
+      width: 1%;
+    }
+
+    kbd {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 3px;
+      padding: 0.1rem 0.4rem;
+      font-family: inherit;
+      font-size: 0.82rem;
+    }
+
+    /* ── Stack ── */
+    .stack-section { padding: 3rem 0; border-top: 1px solid var(--border); }
+
+    .stack-section h2 {
+      font-size: 1.1rem;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      margin-bottom: 1.25rem;
+    }
+
+    .stack-list {
+      list-style: none;
+      display: flex;
+      flex-direction: column;
+      gap: 0.4rem;
+    }
+
+    .stack-list li { font-size: 0.88rem; color: var(--muted); }
+    .stack-list li span { color: var(--text); }
+
+    /* ── Footer ── */
+    footer {
+      border-top: 1px solid var(--border);
+      padding: 2rem 0;
+      font-size: 0.82rem;
+      color: var(--muted);
+    }
+
+    footer a { color: var(--muted); }
+    footer a:hover { color: var(--text); }
+  </style>
+</head>
+<body>
+
+<header>
+  <div class="container">
+    <a href="https://gitlab.com/tek.cat/ttree" style="color:var(--green); font-weight:700;">ttree</a>
+    &nbsp;·&nbsp;
+    <a href="https://gitlab.com/tek.cat/ttree">GitLab</a>
+  </div>
+</header>
+
+<div class="container">
+
+  <!-- Hero -->
+  <section class="hero">
+    <h1>ttree</h1>
+    <p class="tagline">
+      A terminal UI for managing tmux sessions — tree navigation,
+      live pane preview, and full mouse support.
+    </p>
+
+    <div class="badge-row">
+      <span class="badge green">Rust</span>
+      <span class="badge cyan">Ratatui</span>
+      <span class="badge">tmux</span>
+      <span class="badge">~1800 LOC</span>
+    </div>
+
+    <div class="install-block">
+      <span class="prompt">$</span>
+      <code id="install-cmd">cargo install --git https://gitlab.com/tek.cat/ttree</code>
+      <button class="copy-btn" onclick="copyInstall()">copy</button>
+    </div>
+  </section>
+
+  <!-- Demo -->
+  <section class="demo-section">
+    <h2>Demo</h2>
+    <div class="demo-placeholder" id="demo-area">
+      video coming soon
+    </div>
+  </section>
+
+  <!-- Features -->
+  <section class="features-section">
+    <h2>Features</h2>
+    <div class="features">
+      <div class="feature">
+        <div class="icon">🌲</div>
+        <h3>Tree navigation</h3>
+        <p>Browse sessions → windows → panes in a collapsible sidebar. Smart collapsing hides the hierarchy for simple sessions.</p>
+      </div>
+      <div class="feature">
+        <div class="icon">👁</div>
+        <h3>Live pane preview</h3>
+        <p>Embedded PTY renders the active pane in real time. Click any session in the sidebar to switch — without leaving preview mode.</p>
+      </div>
+      <div class="feature">
+        <div class="icon">🖱</div>
+        <h3>Full mouse support</h3>
+        <p>Click to select, scroll to navigate, drag the divider to resize the sidebar, and pass mouse events through to the embedded terminal.</p>
+      </div>
+      <div class="feature">
+        <div class="icon">💾</div>
+        <h3>Persistent state</h3>
+        <p>Selection, expanded nodes, and sidebar width are saved to disk and restored on next launch.</p>
+      </div>
+      <div class="feature">
+        <div class="icon">⌨️</div>
+        <h3>Vim keybindings</h3>
+        <p><code>j</code>/<code>k</code>/<code>h</code>/<code>l</code> for navigation, plus new session, rename, attach, and help.</p>
+      </div>
+      <div class="feature">
+        <div class="icon">🔄</div>
+        <h3>Real-time sync</h3>
+        <p>Tree state syncs with tmux every 200 ms — new panes and closed sessions appear automatically.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- Keybindings -->
+  <section class="keys-section">
+    <h2>Keybindings</h2>
+    <table class="key-table">
+      <tbody>
+        <tr><td class="key"><kbd>j</kbd> / <kbd>↓</kbd></td><td>Move selection down</td></tr>
+        <tr><td class="key"><kbd>k</kbd> / <kbd>↑</kbd></td><td>Move selection up</td></tr>
+        <tr><td class="key"><kbd>h</kbd> / <kbd>←</kbd></td><td>Collapse node / jump to parent</td></tr>
+        <tr><td class="key"><kbd>l</kbd> / <kbd>→</kbd></td><td>Expand node / jump to first child</td></tr>
+        <tr><td class="key"><kbd>Space</kbd></td><td>Toggle expand/collapse</td></tr>
+        <tr><td class="key"><kbd>Enter</kbd></td><td>Open live preview panel</td></tr>
+        <tr><td class="key"><kbd>a</kbd></td><td>Attach to selected session / window / pane</td></tr>
+        <tr><td class="key"><kbd>n</kbd></td><td>Create new session</td></tr>
+        <tr><td class="key"><kbd>r</kbd></td><td>Rename selected session</td></tr>
+        <tr><td class="key"><kbd>Ctrl+P</kbd></td><td>Toggle focus between tree and preview</td></tr>
+        <tr><td class="key"><kbd>?</kbd></td><td>Help overlay</td></tr>
+        <tr><td class="key"><kbd>q</kbd></td><td>Quit</td></tr>
+        <tr><td class="key"><kbd>Ctrl+B</kbd> <kbd>d</kbd></td><td>(Preview mode) Return to tree</td></tr>
+        <tr><td class="key"><kbd>Ctrl+B</kbd> <kbd>…</kbd></td><td>(Preview mode) Pass prefix key to tmux</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <!-- Stack -->
+  <section class="stack-section">
+    <h2>Stack</h2>
+    <ul class="stack-list">
+      <li><span>Rust 2021</span> — language</li>
+      <li><a href="https://ratatui.rs">ratatui</a> — TUI framework</li>
+      <li><a href="https://tokio.rs">tokio</a> — async runtime</li>
+      <li><a href="https://docs.rs/crossterm">crossterm</a> — terminal event handling</li>
+      <li><a href="https://docs.rs/portable-pty">portable-pty</a> — PTY spawning for live preview</li>
+      <li><a href="https://docs.rs/vt100">vt100</a> + <a href="https://docs.rs/tui-term">tui-term</a> — VT100 parsing and rendering</li>
+      <li><a href="https://docs.rs/indexmap">indexmap</a> — ordered session/window/pane collections</li>
+    </ul>
+  </section>
+
+</div>
+
+<footer>
+  <div class="container">
+    <a href="https://gitlab.com/tek.cat/ttree">gitlab.com/tek.cat/ttree</a>
+  </div>
+</footer>
+
+<script>
+  function copyInstall() {
+    const text = document.getElementById('install-cmd').textContent;
+    navigator.clipboard.writeText(text).then(() => {
+      const btn = document.querySelector('.copy-btn');
+      btn.textContent = 'copied!';
+      setTimeout(() => btn.textContent = 'copy', 1500);
+    });
+  }
+</script>
+
+</body>
+</html>

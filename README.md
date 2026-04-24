@@ -30,6 +30,7 @@ Built to solve a specific problem: managing multiple concurrent AI agent session
 ## Install
 
 ```bash
+git clone git@gitlab.com:tek.cat/ttree.git
 cd ttree
 cargo install --path .
 ```

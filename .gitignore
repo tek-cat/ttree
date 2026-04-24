@@ -1,0 +1,7 @@
+/target
+ttree.log
+Cargo.lock
+__pycache__/
+.venv/
+PUBLISH_PLAN.md
+/ttree/
