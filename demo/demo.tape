@@ -7,134 +7,42 @@ Set Height 674
 Set Theme "Catppuccin Mocha"
 Set Padding 0
 Set TypingSpeed 80ms
+Set PlaybackSpeed 1.0
+Set Shell "bash"
 
-# ── Hidden setup: isolated demo environment on ttree-demo socket ──────────────
+# Sessions are pre-created by record.sh in /tmp/ttree-demo-socket
+# TMUX_TMPDIR is passed to VHS via env, so all tmux calls find them
+# No tmux nesting — ttree runs directly in VHS's own terminal
+
 Hide
-
-Type "tmux -L ttree-demo kill-server 2>/dev/null; true"
-Enter
-Sleep 1s
-
-# Use plain bash for all demo sessions (avoids p10k / zsh theming)
-Type "tmux -L ttree-demo new-session -d -s work -x 140 -y 33 '/bin/bash --norc --noprofile'"
-Enter
-Sleep 100ms
-Type "tmux -L ttree-demo send-keys -t work 'vim src/main.rs' Enter"
+Type "clear"
 Enter
 Sleep 200ms
-
-Type "tmux -L ttree-demo new-session -d -s monitoring -x 140 -y 33 '/bin/bash --norc --noprofile'"
-Enter
-Sleep 100ms
-Type "tmux -L ttree-demo send-keys -t monitoring 'htop' Enter"
-Enter
-Sleep 200ms
-
-Type "tmux -L ttree-demo new-session -d -s build -x 140 -y 33 '/bin/bash --norc --noprofile'"
-Enter
-Sleep 100ms
-Type "tmux -L ttree-demo send-keys -t build 'cargo build --release' Enter"
-Enter
-Sleep 300ms
-
-Type "tmux -L ttree-demo new-session -d -s agents -x 140 -y 33 '/bin/bash --norc --noprofile'"
-Enter
-Type "tmux -L ttree-demo new-window -t agents"
-Enter
-Type "tmux -L ttree-demo new-window -t agents"
-Enter
-Type "tmux -L ttree-demo send-keys -t agents:0 'echo [agent-1] running' Enter"
-Enter
-Type "tmux -L ttree-demo send-keys -t agents:1 'echo [agent-2] processing' Enter"
-Enter
-Type "tmux -L ttree-demo send-keys -t agents:2 'echo [agent-3] idle' Enter"
-Enter
-Sleep 300ms
-
-Type "tmux -L ttree-demo new-session -d -s ttree -x 140 -y 37 '/bin/bash --norc --noprofile'"
-Enter
-Sleep 100ms
-Type "tmux -L ttree-demo split-window -v -l 4 -t ttree:0"
-Enter
-Sleep 100ms
-Type "tmux -L ttree-demo send-keys -t ttree:0.1 'cd ~/Projects/ttree/demo && clear' Enter"
-Enter
-Sleep 200ms
-
-Type "tmux -L ttree-demo attach-session -t ttree"
-Enter
-Sleep 1500ms
-
 Show
 
-# ── Startup description ───────────────────────────────────────────────────────
-Ctrl+b
-Type "o"
-Sleep 200ms
-Set TypingSpeed 0ms
-Type './desc.sh "ttree" "a live tmux session manager — tree navigation with embedded pane preview"'
-Enter
-Set TypingSpeed 80ms
-Sleep 200ms
-Ctrl+b
-Type "o"
+# ── Launch ttree ──────────────────────────────────────────────────────────────
 Sleep 500ms
-
-# ══════════════════════════════════════════════════════════════════════════════
-# SECTION 1 — Launch
-# ══════════════════════════════════════════════════════════════════════════════
-
 Type "ttree"
 Enter
 Sleep 3500ms
 
-# ══════════════════════════════════════════════════════════════════════════════
-# SECTION 2 — Tree navigation
-# ══════════════════════════════════════════════════════════════════════════════
-
-Ctrl+b
-Type "o"
-Sleep 300ms
-Set TypingSpeed 0ms
-Type './desc.sh "Tree navigation" "j / k  to move up and down  ·  Space to expand or collapse"'
-Enter
-Set TypingSpeed 80ms
-Sleep 300ms
-Ctrl+b
-Type "o"
+# ── Navigate the tree ─────────────────────────────────────────────────────────
+Down
 Sleep 800ms
-
 Down
-Sleep 700ms
-Down
-Sleep 700ms
-Down
-Sleep 700ms
-Up
-Sleep 700ms
-Up
-Sleep 700ms
-
-# ══════════════════════════════════════════════════════════════════════════════
-# SECTION 3 — Expand / collapse hierarchy
-# ══════════════════════════════════════════════════════════════════════════════
-
-Ctrl+b
-Type "o"
-Sleep 300ms
-Set TypingSpeed 0ms
-Type './desc.sh "Expand / collapse" "the agents session has 3 windows — press Space to reveal them"'
-Enter
-Set TypingSpeed 80ms
-Sleep 300ms
-Ctrl+b
-Type "o"
 Sleep 800ms
+Down
+Sleep 800ms
+Up
+Sleep 600ms
+Up
+Sleep 600ms
 
+# ── Expand the agents session (3 windows) ─────────────────────────────────────
 Down
-Sleep 600ms
+Sleep 500ms
 Down
-Sleep 600ms
+Sleep 500ms
 Space
 Sleep 1200ms
 Down
@@ -146,22 +54,9 @@ Sleep 700ms
 Space
 Sleep 1200ms
 
-# ══════════════════════════════════════════════════════════════════════════════
-# SECTION 4 — Live preview
-# ══════════════════════════════════════════════════════════════════════════════
-
-Ctrl+b
-Type "o"
-Sleep 300ms
-Set TypingSpeed 0ms
-Type './desc.sh "Live pane preview" "press Enter to open an embedded terminal showing the active pane in real time"'
-Enter
-Set TypingSpeed 80ms
-Sleep 300ms
-Ctrl+b
-Type "o"
-Sleep 800ms
-
+# ── Open live preview ─────────────────────────────────────────────────────────
+Up
+Sleep 500ms
 Up
 Sleep 500ms
 Up
@@ -169,22 +64,7 @@ Sleep 500ms
 Enter
 Sleep 3000ms
 
-# ══════════════════════════════════════════════════════════════════════════════
-# SECTION 5 — Switch sessions while staying in preview
-# ══════════════════════════════════════════════════════════════════════════════
-
-Ctrl+b
-Type "o"
-Sleep 300ms
-Set TypingSpeed 0ms
-Type './desc.sh "Session switching" "click or navigate the sidebar to switch sessions — preview updates instantly"'
-Enter
-Set TypingSpeed 80ms
-Sleep 300ms
-Ctrl+b
-Type "o"
-Sleep 800ms
-
+# ── Switch sessions in preview via sidebar ────────────────────────────────────
 Down
 Sleep 1500ms
 Down
@@ -192,52 +72,23 @@ Sleep 1500ms
 Down
 Sleep 1500ms
 
+# ── Back to tree ─────────────────────────────────────────────────────────────
 Ctrl+p
 Sleep 1000ms
 
-# ══════════════════════════════════════════════════════════════════════════════
-# SECTION 6 — New session
-# ══════════════════════════════════════════════════════════════════════════════
-
-Ctrl+b
-Type "o"
-Sleep 300ms
-Set TypingSpeed 0ms
-Type './desc.sh "New session" "press n to create a session — it appears in the tree immediately"'
-Enter
-Set TypingSpeed 80ms
-Sleep 300ms
-Ctrl+b
-Type "o"
-Sleep 800ms
-
+# ── New session ───────────────────────────────────────────────────────────────
 Type "n"
 Sleep 800ms
 Type "new-feature"
-Sleep 600ms
+Sleep 500ms
 Enter
-Sleep 2000ms
+Sleep 1500ms
 
-# ══════════════════════════════════════════════════════════════════════════════
-# SECTION 7 — Rename
-# ══════════════════════════════════════════════════════════════════════════════
-
-Ctrl+b
-Type "o"
-Sleep 300ms
-Set TypingSpeed 0ms
-Type './desc.sh "Rename" "press r to rename the selected session inline"'
-Enter
-Set TypingSpeed 80ms
-Sleep 300ms
-Ctrl+b
-Type "o"
-Sleep 800ms
-
+# ── Rename ────────────────────────────────────────────────────────────────────
 Up
-Sleep 600ms
+Sleep 500ms
 Up
-Sleep 600ms
+Sleep 500ms
 Type "r"
 Sleep 800ms
 Backspace
@@ -246,27 +97,10 @@ Backspace
 Backspace
 Backspace
 Type "release"
-Sleep 600ms
+Sleep 500ms
 Enter
-Sleep 1800ms
+Sleep 1500ms
 
-# ══════════════════════════════════════════════════════════════════════════════
-# SECTION 8 — Attach
-# ══════════════════════════════════════════════════════════════════════════════
-
-Ctrl+b
-Type "o"
-Sleep 300ms
-Set TypingSpeed 0ms
-Type './desc.sh "Attach" "press a to detach ttree and attach directly to the selected session"'
-Enter
-Set TypingSpeed 80ms
-Sleep 300ms
-Ctrl+b
-Type "o"
-Sleep 800ms
-
-Down
-Sleep 600ms
-Type "a"
-Sleep 3000ms
+# ── Quit ──────────────────────────────────────────────────────────────────────
+Type "q"
+Sleep 1000ms
