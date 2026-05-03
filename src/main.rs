@@ -272,63 +272,117 @@ fn encode_mouse(mouse: &crossterm::event::MouseEvent, x_offset: u16, y_offset: u
     Some(format!("\x1b[<{};{};{}{}", button, col, row, suffix).into_bytes())
 }
 
+fn modifier_code(mods: KeyModifiers) -> u8 {
+    let mut m = 1u8;
+    if mods.contains(KeyModifiers::SHIFT) { m += 1; }
+    if mods.contains(KeyModifiers::ALT) { m += 2; }
+    if mods.contains(KeyModifiers::CONTROL) { m += 4; }
+    m
+}
+
+fn csi_letter(letter: char, m: u8, bytes: &mut Vec<u8>) {
+    if m == 1 {
+        bytes.extend_from_slice(format!("\x1b[{}", letter).as_bytes());
+    } else {
+        bytes.extend_from_slice(format!("\x1b[1;{}{}", m, letter).as_bytes());
+    }
+}
+
+fn csi_tilde(n: u8, m: u8, bytes: &mut Vec<u8>) {
+    if m == 1 {
+        bytes.extend_from_slice(format!("\x1b[{}~", n).as_bytes());
+    } else {
+        bytes.extend_from_slice(format!("\x1b[{};{}~", n, m).as_bytes());
+    }
+}
+
 fn encode_key(key: &crossterm::event::KeyEvent, bytes: &mut Vec<u8>) {
     use crossterm::event::KeyCode;
+    let mods = key.modifiers;
+    let m = modifier_code(mods);
+    let alt = mods.contains(KeyModifiers::ALT);
+    let ctrl = mods.contains(KeyModifiers::CONTROL);
+
     match key.code {
         KeyCode::Char(c) => {
-            if key.modifiers.contains(KeyModifiers::CONTROL) {
-                if c >= 'a' && c <= 'z' {
-                    bytes.push(c as u8 - b'a' + 1);
+            if alt { bytes.push(0x1b); }
+            if ctrl {
+                let lc = c.to_ascii_lowercase();
+                if lc.is_ascii_lowercase() {
+                    bytes.push(lc as u8 - b'a' + 1);
                 } else if (b'@'..=b'_').contains(&(c as u8)) {
                     bytes.push(c as u8 - b'@');
                 } else if c == ' ' {
                     bytes.push(0);
+                } else if c == '?' {
+                    bytes.push(127);
+                } else if c == '/' {
+                    bytes.push(31);
+                } else {
+                    bytes.extend_from_slice(c.to_string().as_bytes());
                 }
-            } else if key.modifiers.contains(KeyModifiers::ALT) {
-                bytes.push(27);
-                bytes.extend_from_slice(c.to_string().as_bytes());
             } else {
                 bytes.extend_from_slice(c.to_string().as_bytes());
             }
         }
-        KeyCode::Enter => bytes.push(b'\r'),
-        KeyCode::Esc => bytes.push(27),
+        KeyCode::Enter => {
+            if alt { bytes.push(0x1b); }
+            bytes.push(b'\r');
+        }
+        KeyCode::Esc => {
+            if alt { bytes.push(0x1b); }
+            bytes.push(27);
+        }
         KeyCode::Backspace => {
-            if key.modifiers.contains(KeyModifiers::ALT) {
-                bytes.push(27);
+            if alt { bytes.push(0x1b); }
+            if ctrl { bytes.push(0x08); } else { bytes.push(127); }
+        }
+        KeyCode::Tab => {
+            if mods.contains(KeyModifiers::SHIFT) {
+                bytes.extend_from_slice(b"\x1b[Z");
+            } else {
+                if alt { bytes.push(0x1b); }
+                bytes.push(b'\t');
             }
-            bytes.push(127);
         }
-        KeyCode::Tab => bytes.push(b'\t'),
-        KeyCode::Up => {
-            if key.modifiers.contains(KeyModifiers::ALT) { bytes.extend_from_slice(b"\x1b[1;3A"); }
-            else { bytes.extend_from_slice(b"\x1b[A"); }
-        }
-        KeyCode::Down => {
-            if key.modifiers.contains(KeyModifiers::ALT) { bytes.extend_from_slice(b"\x1b[1;3B"); }
-            else { bytes.extend_from_slice(b"\x1b[B"); }
-        }
-        KeyCode::Right => {
-            if key.modifiers.contains(KeyModifiers::ALT) { bytes.extend_from_slice(b"\x1b[1;3C"); }
-            else { bytes.extend_from_slice(b"\x1b[C"); }
-        }
-        KeyCode::Left => {
-            if key.modifiers.contains(KeyModifiers::ALT) { bytes.extend_from_slice(b"\x1b[1;3D"); }
-            else { bytes.extend_from_slice(b"\x1b[D"); }
-        }
-        KeyCode::Home => bytes.extend_from_slice(b"\x1b[H"),
-        KeyCode::End => bytes.extend_from_slice(b"\x1b[F"),
-        KeyCode::PageUp => bytes.extend_from_slice(b"\x1b[5~"),
-        KeyCode::PageDown => bytes.extend_from_slice(b"\x1b[6~"),
-        KeyCode::Delete => bytes.extend_from_slice(b"\x1b[3~"),
+        KeyCode::BackTab => bytes.extend_from_slice(b"\x1b[Z"),
+        KeyCode::Up => csi_letter('A', m, bytes),
+        KeyCode::Down => csi_letter('B', m, bytes),
+        KeyCode::Right => csi_letter('C', m, bytes),
+        KeyCode::Left => csi_letter('D', m, bytes),
+        KeyCode::Home => csi_letter('H', m, bytes),
+        KeyCode::End => csi_letter('F', m, bytes),
+        KeyCode::Insert => csi_tilde(2, m, bytes),
+        KeyCode::Delete => csi_tilde(3, m, bytes),
+        KeyCode::PageUp => csi_tilde(5, m, bytes),
+        KeyCode::PageDown => csi_tilde(6, m, bytes),
         KeyCode::F(n) => {
-            let s = match n {
-                1 => "\x1bOP", 2 => "\x1bOQ", 3 => "\x1bOR", 4 => "\x1bOS",
-                5 => "\x1b[15~", 6 => "\x1b[17~", 7 => "\x1b[18~", 8 => "\x1b[19~",
-                9 => "\x1b[20~", 10 => "\x1b[21~", 11 => "\x1b[23~", 12 => "\x1b[24~",
-                _ => "",
-            };
-            bytes.extend_from_slice(s.as_bytes());
+            if m == 1 {
+                let s = match n {
+                    1 => "\x1bOP", 2 => "\x1bOQ", 3 => "\x1bOR", 4 => "\x1bOS",
+                    5 => "\x1b[15~", 6 => "\x1b[17~", 7 => "\x1b[18~", 8 => "\x1b[19~",
+                    9 => "\x1b[20~", 10 => "\x1b[21~", 11 => "\x1b[23~", 12 => "\x1b[24~",
+                    _ => "",
+                };
+                bytes.extend_from_slice(s.as_bytes());
+            } else {
+                let s = match n {
+                    1 => format!("\x1b[1;{}P", m),
+                    2 => format!("\x1b[1;{}Q", m),
+                    3 => format!("\x1b[1;{}R", m),
+                    4 => format!("\x1b[1;{}S", m),
+                    5 => format!("\x1b[15;{}~", m),
+                    6 => format!("\x1b[17;{}~", m),
+                    7 => format!("\x1b[18;{}~", m),
+                    8 => format!("\x1b[19;{}~", m),
+                    9 => format!("\x1b[20;{}~", m),
+                    10 => format!("\x1b[21;{}~", m),
+                    11 => format!("\x1b[23;{}~", m),
+                    12 => format!("\x1b[24;{}~", m),
+                    _ => String::new(),
+                };
+                bytes.extend_from_slice(s.as_bytes());
+            }
         }
         _ => {}
     }
