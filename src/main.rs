@@ -1,6 +1,10 @@
 use anyhow::Result;
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers, MouseButton, MouseEventKind},
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers,
+        KeyboardEnhancementFlags, MouseButton, MouseEventKind, PopKeyboardEnhancementFlags,
+        PushKeyboardEnhancementFlags,
+    },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -20,7 +24,12 @@ fn setup_panic_hook() {
     std::panic::set_hook(Box::new(move |panic_info| {
         let _ = disable_raw_mode();
         let mut stdout = io::stdout();
-        let _ = execute!(stdout, LeaveAlternateScreen, DisableMouseCapture);
+        let _ = execute!(
+            stdout,
+            PopKeyboardEnhancementFlags,
+            LeaveAlternateScreen,
+            DisableMouseCapture
+        );
         default_hook(panic_info);
     }));
 }
@@ -326,26 +335,54 @@ fn encode_key(key: &crossterm::event::KeyEvent, bytes: &mut Vec<u8>) {
             }
         }
         KeyCode::Enter => {
-            if alt { bytes.push(0x1b); }
-            bytes.push(b'\r');
-        }
-        KeyCode::Esc => {
-            if alt { bytes.push(0x1b); }
-            bytes.push(27);
-        }
-        KeyCode::Backspace => {
-            if alt { bytes.push(0x1b); }
-            if ctrl { bytes.push(0x08); } else { bytes.push(127); }
-        }
-        KeyCode::Tab => {
-            if mods.contains(KeyModifiers::SHIFT) {
-                bytes.extend_from_slice(b"\x1b[Z");
+            if mods.is_empty() {
+                bytes.push(b'\r');
+            } else if mods == KeyModifiers::ALT {
+                bytes.push(0x1b);
+                bytes.push(b'\r');
             } else {
-                if alt { bytes.push(0x1b); }
-                bytes.push(b'\t');
+                bytes.extend_from_slice(format!("\x1b[13;{}u", m).as_bytes());
             }
         }
-        KeyCode::BackTab => bytes.extend_from_slice(b"\x1b[Z"),
+        KeyCode::Esc => {
+            if mods.is_empty() {
+                bytes.push(27);
+            } else if mods == KeyModifiers::ALT {
+                bytes.push(0x1b);
+                bytes.push(27);
+            } else {
+                bytes.extend_from_slice(format!("\x1b[27;{}u", m).as_bytes());
+            }
+        }
+        KeyCode::Backspace => {
+            if mods.contains(KeyModifiers::SHIFT) {
+                bytes.extend_from_slice(format!("\x1b[127;{}u", m).as_bytes());
+            } else {
+                if alt { bytes.push(0x1b); }
+                if ctrl { bytes.push(0x08); } else { bytes.push(127); }
+            }
+        }
+        KeyCode::Tab => {
+            if mods.is_empty() {
+                bytes.push(b'\t');
+            } else if mods == KeyModifiers::SHIFT {
+                bytes.extend_from_slice(b"\x1b[Z");
+            } else if mods == KeyModifiers::ALT {
+                bytes.push(0x1b);
+                bytes.push(b'\t');
+            } else {
+                bytes.extend_from_slice(format!("\x1b[9;{}u", m).as_bytes());
+            }
+        }
+        KeyCode::BackTab => {
+            if mods.is_empty() || mods == KeyModifiers::SHIFT {
+                bytes.extend_from_slice(b"\x1b[Z");
+            } else {
+                let mut bm = m;
+                if !mods.contains(KeyModifiers::SHIFT) { bm += 1; }
+                bytes.extend_from_slice(format!("\x1b[9;{}u", bm).as_bytes());
+            }
+        }
         KeyCode::Up => csi_letter('A', m, bytes),
         KeyCode::Down => csi_letter('B', m, bytes),
         KeyCode::Right => csi_letter('C', m, bytes),
@@ -397,6 +434,10 @@ async fn run_app(state: &mut AppState) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    let _ = execute!(
+        stdout,
+        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+    );
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -774,6 +815,7 @@ async fn run_app(state: &mut AppState) -> Result<()> {
                             disable_raw_mode()?;
                             execute!(
                                 io::stdout(),
+                                PopKeyboardEnhancementFlags,
                                 LeaveAlternateScreen,
                                 DisableMouseCapture
                             )?;
@@ -784,6 +826,7 @@ async fn run_app(state: &mut AppState) -> Result<()> {
                             disable_raw_mode()?;
                             execute!(
                                 io::stdout(),
+                                PopKeyboardEnhancementFlags,
                                 LeaveAlternateScreen,
                                 DisableMouseCapture
                             )?;
@@ -895,6 +938,7 @@ async fn run_app(state: &mut AppState) -> Result<()> {
     disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),
+        PopKeyboardEnhancementFlags,
         LeaveAlternateScreen,
         DisableMouseCapture
     )?;
