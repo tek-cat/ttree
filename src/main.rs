@@ -525,6 +525,10 @@ async fn run_app(state: &mut AppState) -> Result<()> {
                     if let Ok(master) = term.pty_master.lock() {
                         let _ = master.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
                     }
+                    if let Ok(mut parser) = term.parser.write() {
+                        parser.screen_mut().set_size(rows, cols);
+                    }
+                    let _ = terminal.clear();
                 }
             }
             last_terminal_size = current_size;
