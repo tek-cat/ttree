@@ -73,6 +73,34 @@ pub fn render(
         }
     }
 
+    // Paint our own selection highlight over whatever the embedded terminal
+    // just drew. Coordinates in PreviewSelection are vt100-local, so they get
+    // offset by the preview area's origin and clipped to its rect.
+    if let Some(sel) = &state.preview_selection {
+        let (start, end) = if sel.anchor <= sel.head {
+            (sel.anchor, sel.head)
+        } else {
+            (sel.head, sel.anchor)
+        };
+        let buf = frame.buffer_mut();
+        let last_col = preview_area.width.saturating_sub(1);
+        for vt_row in start.0..=end.0 {
+            let row_start = if vt_row == start.0 { start.1 } else { 0 };
+            let row_end = if vt_row == end.0 { end.1 } else { last_col };
+            for vt_col in row_start..=row_end {
+                let x = preview_area.x.saturating_add(vt_col);
+                let y = preview_area.y.saturating_add(vt_row);
+                if x < preview_area.x + preview_area.width
+                    && y < preview_area.y + preview_area.height
+                {
+                    if let Some(cell) = buf.cell_mut((x, y)) {
+                        cell.modifier |= Modifier::REVERSED;
+                    }
+                }
+            }
+        }
+    }
+
     // Command Bar - contextual based on panel mode
     let (cmd_text, mode_label) = match state.focus.panel {
         crate::state::Panel::Tree => (
