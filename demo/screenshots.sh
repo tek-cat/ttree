@@ -8,18 +8,44 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
+# CRITICAL: drop any inherited tmux context BEFORE the first tmux call.
+# If this script runs from inside a tmux session, $TMUX names the real
+# server's socket and overrides TMUX_TMPDIR -- every "tmux new-session"
+# below would then land on your REAL server, and the cleanup trap's
+# "tmux kill-server" would kill ALL your real sessions. Unsetting first
+# makes every tmux command honor TMUX_TMPDIR (its own throwaway socket).
+unset TMUX TMUX_PANE
 export TMUX_TMPDIR="$(mktemp -d -t ttree-screenshots-XXXXXX)"
 
 cleanup() {
     echo "==> Cleaning up demo sessions..."
-    tmux kill-server 2>/dev/null || true
+    # Guard: only ever kill a server whose socket lives under OUR temp dir.
+    local sp; sp="$(tmux display-message -p '#{socket_path}' 2>/dev/null || true)"
+    if [[ "$TMUX_TMPDIR" == */ttree-screenshots-* && ( -z "$sp" || "$sp" == "$TMUX_TMPDIR"* ) ]]; then
+        tmux kill-server 2>/dev/null || true
+    fi
     rm -rf "$TMUX_TMPDIR"
 }
 trap cleanup EXIT
 
 echo "==> Creating demo tmux sessions in $TMUX_TMPDIR ..."
 
-tmux new-session -d -s work       -x 200 -y 50 '/bin/bash --norc --noprofile'
+# Hard isolation gate: create one probe session and verify its socket lives
+# under TMUX_TMPDIR before doing anything else. If not, abort without ever
+# running kill-server against whatever server we accidentally hit.
+tmux new-session -d -s work -x 200 -y 50 '/bin/bash --norc --noprofile'
+SOCK_PATH="$(tmux display-message -t work -p '#{socket_path}')"
+case "$SOCK_PATH" in
+    "$TMUX_TMPDIR"*) : ;;  # isolated, good
+    *)
+        echo "!! tmux is NOT isolated (socket: $SOCK_PATH); aborting to protect real sessions." >&2
+        tmux kill-session -t work 2>/dev/null || true
+        trap - EXIT
+        rm -rf "$TMUX_TMPDIR"
+        exit 3
+        ;;
+esac
+
 tmux send-keys   -t work 'vim ~/Projects/ttree/src/main.rs' Enter
 sleep 0.5
 
@@ -47,9 +73,6 @@ cd demo
 mkdir -p ../docs/screenshots
 
 echo "==> Capturing screenshots with VHS..."
-# Unset TMUX so ttree runs as if outside any tmux session inside VHS.
-unset TMUX
-unset TMUX_PANE
 vhs screenshots.tape
 
 # VHS requires an Output directive; discard the dummy video.
