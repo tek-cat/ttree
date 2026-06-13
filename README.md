@@ -1,5 +1,7 @@
 # ttree
 
+![ttree — a Rust TUI for tmux sessions, showing the session tree and a live pane preview](docs/hero.png)
+
 A terminal UI for managing tmux sessions, written in Rust with [Ratatui](https://ratatui.rs).
 
 Provides tree-based navigation (sessions → windows → panes) with **live embedded pane preview** — you can see what's running in any pane without switching to it.
@@ -13,6 +15,7 @@ Built to solve a specific problem: managing multiple concurrent AI agent session
 - Click any session in the sidebar to switch the preview — works without leaving preview mode
 - Persistent UI state (selection, expanded nodes, sidebar width) across restarts
 - Full mouse support: click to select, drag sidebar to resize, scroll to navigate
+- Drag to select text in the preview — copies to the system clipboard via OSC 52 (works over SSH and tmux)
 - Vim-style navigation (`j`/`k`/`h`/`l`)
 - Create and rename sessions without leaving the TUI
 - Real-time sync with tmux every 200ms
@@ -60,6 +63,6 @@ Run `ttree` from any terminal (inside or outside tmux).
 
 In preview mode, `Ctrl+B` acts as the tmux prefix (e.g. `Ctrl+B d` to detach and return to tree).
 
-## History
+## Background
 
-This repo also contains `tmux_session_manager.py`, an earlier Python/[Textual](https://textual.textualize.io) prototype with AI agent activity detection (classifies tmux windows as idle/working/needs-attention). The Rust rewrite (ttree) focuses on session management UX; the Python prototype's agent-detection logic is separate tooling.
+ttree began as a Rust rewrite of an earlier personal Python/[Textual](https://textual.textualize.io) prototype for the same workflow. This repository contains the Rust tool only.
