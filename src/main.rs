@@ -491,6 +491,13 @@ async fn run_app(state: &mut AppState) -> Result<()> {
     );
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
+    // Blank the alternate screen before the first draw. ratatui diffs against an
+    // assumed-empty buffer and only writes the cells we paint, so any pre-existing
+    // output (e.g. the fish/fastfetch login greeting) shows through the cells we
+    // leave untouched (the preview panel when no preview is open). Most terminals
+    // clear the alt screen on entry, but mosh and GNU screen do not, so do it
+    // explicitly here.
+    terminal.clear()?;
 
     let mut last_sync_update = tokio::time::Instant::now();
     let action_attach: Option<String>;
