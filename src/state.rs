@@ -168,9 +168,8 @@ impl AppState {
         }
         if let Some(sel) = &self.focus.selected_id {
             if let Some(pos) = list.iter().position(|x| x == sel) {
-                if pos > 0 {
-                    self.focus.selected_id = Some(list[pos - 1].clone());
-                }
+                let next = if pos > 0 { pos - 1 } else { list.len() - 1 };
+                self.focus.selected_id = Some(list[next].clone());
                 return;
             }
         }
@@ -184,9 +183,8 @@ impl AppState {
         }
         if let Some(sel) = &self.focus.selected_id {
             if let Some(pos) = list.iter().position(|x| x == sel) {
-                if pos + 1 < list.len() {
-                    self.focus.selected_id = Some(list[pos + 1].clone());
-                }
+                let next = if pos + 1 < list.len() { pos + 1 } else { 0 };
+                self.focus.selected_id = Some(list[next].clone());
                 return;
             }
         }
