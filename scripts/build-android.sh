@@ -4,8 +4,7 @@
 # Full rationale and the dead-ends we ruled out: docs/android-termux-build.md
 #
 # Usage:
-#   scripts/build-android.sh            # build release binary
-#   scripts/build-android.sh --deploy   # build, strip, scp+install to ssh host "phone"
+#   scripts/build-android.sh            # build + strip the release binary
 #
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -37,11 +36,3 @@ BIN="target/$TARGET/release/ttree"
 "$NB/llvm-strip" "$BIN" 2>/dev/null || true
 echo ">> built: $BIN"
 file "$BIN"
-
-if [ "${1:-}" = "--deploy" ]; then
-  HOST="${2:-phone}"
-  PREFIX_BIN=/data/data/com.termux/files/usr/bin/ttree
-  echo ">> deploying to $HOST"
-  scp "$BIN" "$HOST:~/ttree.new"
-  ssh "$HOST" "sh -c 'mv ~/ttree.new $PREFIX_BIN && chmod +x $PREFIX_BIN && echo installed: \$(command -v ttree)'"
-fi

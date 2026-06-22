@@ -7,12 +7,14 @@ importantly, the approaches that **don't** work, so nobody re-walks the same wal
 ## TL;DR
 
 ```sh
-scripts/build-android.sh --deploy          # builds + installs to ssh host "phone"
+scripts/build-android.sh          # builds + strips the binary
 ```
 
-Produces a native **`aarch64-linux-android`** (Bionic) PIE binary, strips it, and
-`scp`s it to `$PREFIX/bin/ttree` on the phone. Requires Android NDK r28
-(`ANDROID_NDK_HOME` or `~/android_sdk/ndk/*`) and `rustup`.
+Produces a native **`aarch64-linux-android`** (Bionic) PIE binary at
+`target/aarch64-linux-android/release/ttree` and strips it. Requires Android NDK r28
+(`ANDROID_NDK_HOME` or `~/android_sdk/ndk/*`) and `rustup`. To get it onto the phone,
+use the prebuilt release download (see the README), or copy a locally-built binary to
+`$PREFIX/bin/ttree`.
 
 ## Why cross-compile instead of building on the phone
 
@@ -87,12 +89,11 @@ those still use the crates.io `termios`.
   Set via `CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER` (and `CC_*`/`AR_*` for safety).
 - No C dependencies in the tree, so nothing else from the NDK is needed.
 
-## Deploy
+## Installing on the phone
 
-```sh
-scp target/aarch64-linux-android/release/ttree phone:~/ttree.new
-ssh phone 'mv ~/ttree.new $PREFIX/bin/ttree && chmod +x $PREFIX/bin/ttree'
-```
+Get the binary onto the phone via the prebuilt release download, or by copying a
+locally-built binary to `$PREFIX/bin/ttree`. See the README's "Run on Android /
+Termux" section.
 
 ## Verifying it runs
 

@@ -44,7 +44,7 @@ Prefer a prebuilt binary? Every tagged release publishes stripped binaries for *
 
 ttree is meant to be driven from a phone, so it runs natively on Android under Termux (`aarch64`). Building the full dependency tree on a phone tends to run out of RAM or disk, so the supported path is a cross-build on a laptop.
 
-Three ways to get the binary onto the phone:
+Two ways to get the binary onto the phone:
 
 - **Prebuilt release binary (no toolchain needed).** Every tagged release attaches a stripped Android binary on the [Releases page](https://gitlab.com/tek.cat/ttree/-/releases). Pull the latest straight to the phone:
 
@@ -54,13 +54,7 @@ Three ways to get the binary onto the phone:
   chmod +x "$PREFIX/bin/ttree"
   ```
 
-- **Build and deploy from a laptop** (needs `rustup` and Android NDK r28):
-
-  ```sh
-  scripts/build-android.sh --deploy            # builds, strips, scp+installs to ssh host "phone"
-  ```
-
-- **Build only**, then copy the artifact yourself:
+- **Build it yourself** on a laptop (needs `rustup` and Android NDK r28), then copy the binary over:
 
   ```sh
   scripts/build-android.sh                      # -> target/aarch64-linux-android/release/ttree
