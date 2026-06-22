@@ -1,9 +1,9 @@
 use anyhow::Result;
 use crossterm::{
     event::{
-        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers,
-        KeyboardEnhancementFlags, MouseButton, MouseEventKind, PopKeyboardEnhancementFlags,
-        PushKeyboardEnhancementFlags,
+        self, DisableFocusChange, DisableMouseCapture, EnableMouseCapture, Event, KeyCode,
+        KeyModifiers, KeyboardEnhancementFlags, MouseButton, MouseEventKind,
+        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
@@ -281,6 +281,26 @@ fn encode_mouse(mouse: &crossterm::event::MouseEvent, x_offset: u16, y_offset: u
     Some(format!("\x1b[<{};{};{}{}", button, col, row, suffix).into_bytes())
 }
 
+/// Whether a mouse event should be forwarded to the embedded preview, given the
+/// mouse tracking mode the embedded app has actually requested. Without this we
+/// stream every motion/scroll report at apps that never asked for the mouse,
+/// and those `\e[<…M` reports leak into the prompt as literal text.
+fn should_forward_mouse(kind: &MouseEventKind, mode: vt100::MouseProtocolMode) -> bool {
+    use vt100::MouseProtocolMode as M;
+    match mode {
+        // App wants no mouse input at all.
+        M::None => false,
+        // Button press/release (and wheel), but never motion.
+        M::Press | M::PressRelease => {
+            !matches!(kind, MouseEventKind::Moved | MouseEventKind::Drag(_))
+        }
+        // Also motion while a button is held, but not bare hover motion.
+        M::ButtonMotion => !matches!(kind, MouseEventKind::Moved),
+        // Everything, including hover motion.
+        M::AnyMotion => true,
+    }
+}
+
 fn base64_encode(data: &[u8]) -> String {
     const T: &[u8; 64] =
         b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -485,6 +505,13 @@ async fn run_app(state: &mut AppState) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    // We never use focus reporting, but something upstream (the terminal itself,
+    // mosh, or an outer tmux) may leave mode 1004 enabled. Those `\e[I`/`\e[O`
+    // sequences are useless to us and actively harmful: over a laggy link
+    // crossterm can split the ESC from the rest, decompose them into bare
+    // Esc/`[`/`O` keypresses, and we'd forward that noise into the embedded
+    // preview's prompt. Disable focus reporting at the source.
+    let _ = execute!(stdout, DisableFocusChange);
     let _ = execute!(
         stdout,
         PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
@@ -792,10 +819,11 @@ async fn run_app(state: &mut AppState) -> Result<()> {
                         let x_offset = state.sidebar_cols;
                         let y_offset = 0u16;
                         let no_mods = mouse.modifiers.is_empty();
-                        let (vt_rows, vt_cols) = if let Ok(p) = term.parser.read() {
-                            p.screen().size()
+                        let (vt_rows, vt_cols, mouse_mode) = if let Ok(p) = term.parser.read() {
+                            let (r, c) = p.screen().size();
+                            (r, c, p.screen().mouse_protocol_mode())
                         } else {
-                            (0u16, 0u16)
+                            (0u16, 0u16, vt100::MouseProtocolMode::None)
                         };
                         let max_row = vt_rows.saturating_sub(1);
                         let max_col = vt_cols.saturating_sub(1);
@@ -844,12 +872,17 @@ async fn run_app(state: &mut AppState) -> Result<()> {
                                         handled = true;
                                     } else if let Some(down) = pending_pty_down.take() {
                                         // Plain click (no drag) — replay the
-                                        // suppressed Down, then forward Up.
-                                        if let Some(bytes) = encode_mouse(&down, x_offset, y_offset) {
-                                            let _ = term.pty_writer.send(bytes);
+                                        // suppressed Down, then forward Up, but
+                                        // only if the app is tracking the mouse.
+                                        if should_forward_mouse(&down.kind, mouse_mode) {
+                                            if let Some(bytes) = encode_mouse(&down, x_offset, y_offset) {
+                                                let _ = term.pty_writer.send(bytes);
+                                            }
                                         }
-                                        if let Some(bytes) = encode_mouse(&mouse, x_offset, y_offset) {
-                                            let _ = term.pty_writer.send(bytes);
+                                        if should_forward_mouse(&mouse.kind, mouse_mode) {
+                                            if let Some(bytes) = encode_mouse(&mouse, x_offset, y_offset) {
+                                                let _ = term.pty_writer.send(bytes);
+                                            }
                                         }
                                         handled = true;
                                     }
@@ -864,7 +897,7 @@ async fn run_app(state: &mut AppState) -> Result<()> {
                             }
                         }
 
-                        if !handled {
+                        if !handled && should_forward_mouse(&mouse.kind, mouse_mode) {
                             if let Some(bytes) = encode_mouse(&mouse, x_offset, y_offset) {
                                 let _ = term.pty_writer.send(bytes);
                             }
