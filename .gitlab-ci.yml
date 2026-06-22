@@ -42,9 +42,22 @@ build:android:
   rules:
     - if: '$CI_COMMIT_BRANCH == "main"'
     - if: '$CI_COMMIT_TAG'
+  # Cache the ~700 MB NDK zip across pipelines, keyed on version, so we only hit
+  # dl.google.com on a cache miss (or when NDK_VERSION changes). Caching the zip
+  # rather than the unpacked tree keeps the cache small; re-extracting is cheap.
+  cache:
+    key: "ndk-$NDK_VERSION"
+    paths:
+      - ndk.zip
   before_script:
     - apt-get update && apt-get install -y --no-install-recommends unzip curl file
-    - curl -sSLo ndk.zip "https://dl.google.com/android/repository/android-ndk-${NDK_VERSION}-linux.zip"
+    - |
+      if [ ! -f ndk.zip ]; then
+        echo "NDK not in cache, downloading ${NDK_VERSION}..."
+        curl -sSLo ndk.zip "https://dl.google.com/android/repository/android-ndk-${NDK_VERSION}-linux.zip"
+      else
+        echo "Using cached ndk.zip"
+      fi
     - unzip -q ndk.zip
     - export ANDROID_NDK_HOME="$PWD/android-ndk-${NDK_VERSION}"
   script:
