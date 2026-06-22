@@ -38,6 +38,40 @@ cargo install --path .
 
 The binary lands in `~/.cargo/bin/ttree`. Requires Rust and an active tmux server.
 
+Prefer a prebuilt binary? Every tagged release publishes stripped binaries for **x86_64 Linux (glibc)** and **aarch64 Android/Termux** on the [Releases page](https://gitlab.com/tek.cat/ttree/-/releases), built by CI.
+
+## Run on Android / Termux
+
+ttree is meant to be driven from a phone, so it runs natively on Android under Termux (`aarch64`). Building the full dependency tree on a phone tends to run out of RAM or disk, so the supported path is a cross-build on a laptop.
+
+Three ways to get the binary onto the phone:
+
+- **Release or CI artifact (no toolchain needed).** Tagged releases attach a prebuilt Android binary on the [Releases page](https://gitlab.com/tek.cat/ttree/-/releases). To instead track the tip of `main`, every push cross-builds one; pull it from the phone with:
+
+  ```sh
+  curl -sSLo "$PREFIX/bin/ttree" \
+    "https://gitlab.com/tek.cat/ttree/-/jobs/artifacts/main/raw/target/aarch64-linux-android/release/ttree?job=build:android"
+  chmod +x "$PREFIX/bin/ttree"
+  ```
+
+- **Build and deploy from a laptop** (needs `rustup` and Android NDK r28):
+
+  ```sh
+  scripts/build-android.sh --deploy            # builds, strips, scp+installs to ssh host "phone"
+  ```
+
+- **Build only**, then copy the artifact yourself:
+
+  ```sh
+  scripts/build-android.sh                      # -> target/aarch64-linux-android/release/ttree
+  ```
+
+In Termux, the install prefix is `$PREFIX/bin` (`/data/data/com.termux/files/usr/bin`). You also need `tmux` on the phone (`pkg install tmux`).
+
+**Low-memory caveat:** ttree spawns a PTY + vt100 parser per visible pane, so on a memory-starved phone, pointing it at a busy tmux server can trip Android's low-memory killer (it can even take down `sshd`). Free RAM first, keep the visible pane count modest, and prefer `mosh` over plain SSH so the session survives a reconnect.
+
+Full rationale, toolchain details, and the approaches that don't work (notably static musl): [`docs/android-termux-build.md`](docs/android-termux-build.md).
+
 ## Usage
 
 Run `ttree` from any terminal, inside or outside tmux.
