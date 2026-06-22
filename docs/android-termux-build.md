@@ -46,41 +46,23 @@ Termux, and the failure is instructive:
 Conclusion: on Android, even a "static" PIE is loaded by Bionic, so it has to *be* a
 Bionic binary. Use the `aarch64-linux-android` target.
 
-## The one blocker on the Android target: `termios 0.2.2`
+## Dependencies: no special handling needed
 
-`portable-pty 0.8.1` depends (unconditionally, on unix) on
-`serial → serial-unix → termios 0.2.2`. `termios 0.2.2`'s `src/os/mod.rs` only has
-arms for linux/macos/freebsd/openbsd (**no `target_os = "android"`**), so it fails:
+There are no C dependencies, and nothing in the tree needs an android shim. ttree
+uses `portable-pty` 0.9, whose serial backend is `serial2`, and that compiles cleanly
+for `aarch64-linux-android`. A plain `cargo build --target aarch64-linux-android`
+(with the NDK linker, below) just works, for cross-builds and for native Termux
+builds alike. No patch, no fork, no vendored crate.
 
-```
-error[E0433]: could not find `target` in `os`
-```
-
-`ioctl-rs` (the sibling dep) already handles android; only `termios` is missing it.
-
-### Fix: vendored shim, via `[patch.crates-io]`
-
-`third_party/termios/` is a copy of `termios 0.2.2` with one change in
-`src/os/mod.rs`: android is mapped to the existing `linux` module.
-
-```rust
-#[cfg(any(target_os = "linux", target_os = "android"))] pub use self::linux as target;
-#[cfg(any(target_os = "linux", target_os = "android"))] pub mod linux;
-```
-
-`Cargo.toml` wires it in:
-
-```toml
-[patch.crates-io]
-termios = { path = "third_party/termios" }
-```
-
-**Why this is safe:** ttree only uses portable-pty's PTY path, never its serial-port
-path, so all of `serial`/`termios` is dead code (and `--gc-sections` drops it). The
-linux struct layout is wrong for Bionic (`NCCS` 32 vs 19, etc.), but since the code
-is never called, it never matters at runtime. It only needs to *compile*. This has
-no effect on native Linux/macOS builds: `[patch]` for the android cross-build aside,
-those still use the crates.io `termios`.
+> **History (so nobody re-walks this).** portable-pty 0.8 pulled
+> `serial → serial-unix → termios 0.2.2`, and termios 0.2.2 has no
+> `target_os = "android"` arm (`error[E0433]: could not find target in os`), so it
+> failed to compile for this target. We briefly vendored a patched termios under
+> `third_party/termios/` via `[patch.crates-io]`. Upgrading to **portable-pty 0.9**
+> (which swapped `serial` for `serial2`) dropped the termios dependency entirely and
+> made the vendored fork unnecessary, so it was removed. If a future dependency
+> reintroduces a crate without an android arm, prefer upgrading or replacing that
+> crate over vendoring a patch.
 
 ## Toolchain details
 

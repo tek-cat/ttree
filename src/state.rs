@@ -1,6 +1,6 @@
 use indexmap::IndexMap;
 use ratatui::layout::Rect;
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
 pub type SessionId = String;
@@ -63,21 +63,22 @@ impl AppState {
             let config_dir = proj_dirs.config_dir();
             let _ = std::fs::create_dir_all(config_dir);
             let state_path = config_dir.join("state.toml");
-            
-            let mut expanded_ids: Vec<String> = self.sessions.iter()
+
+            let mut expanded_ids: Vec<String> = self
+                .sessions
+                .iter()
                 .filter(|(_, s)| s.expanded)
                 .map(|(id, _)| id.clone())
                 .collect();
-            expanded_ids.extend(self.windows.iter()
-                .filter(|(_, w)| w.expanded)
-                .map(|(id, _)| id.clone()));
-            
+            expanded_ids
+                .extend(self.windows.iter().filter(|(_, w)| w.expanded).map(|(id, _)| id.clone()));
+
             let persistent = PersistentState {
                 focus: self.focus.clone(),
                 expanded_ids,
                 sidebar_cols: self.sidebar_cols,
             };
-            
+
             if let Ok(toml) = toml::to_string(&persistent) {
                 let _ = std::fs::write(state_path, toml);
             }
@@ -103,14 +104,18 @@ impl AppState {
         let mut list = Vec::new();
         for session in self.sessions.values() {
             let num_windows = session.windows.len();
-            let total_panes: usize = session.windows.iter()
+            let total_panes: usize = session
+                .windows
+                .iter()
                 .filter_map(|wid| self.windows.get(wid))
                 .map(|w| w.panes.len())
                 .sum();
 
             if num_windows <= 1 && total_panes <= 1 {
                 // Single leaf: use pane ID (or session ID if no panes yet)
-                let leaf_id = session.windows.first()
+                let leaf_id = session
+                    .windows
+                    .first()
                     .and_then(|wid| self.windows.get(wid))
                     .and_then(|w| w.panes.first())
                     .cloned()
@@ -120,8 +125,8 @@ impl AppState {
                 // Session header + panes directly (window level skipped)
                 list.push(session.id.clone());
                 if session.expanded {
-                    if let Some(window) = session.windows.first()
-                        .and_then(|wid| self.windows.get(wid))
+                    if let Some(window) =
+                        session.windows.first().and_then(|wid| self.windows.get(wid))
                     {
                         for pid in &window.panes {
                             list.push(pid.clone());
@@ -136,9 +141,7 @@ impl AppState {
                         if let Some(window) = self.windows.get(wid) {
                             if window.panes.len() <= 1 {
                                 // Window leaf: use pane ID
-                                let leaf_id = window.panes.first()
-                                    .cloned()
-                                    .unwrap_or(wid.clone());
+                                let leaf_id = window.panes.first().cloned().unwrap_or(wid.clone());
                                 list.push(leaf_id);
                             } else {
                                 // Window header
@@ -155,10 +158,6 @@ impl AppState {
             }
         }
         list
-    }
-
-    pub fn get_flat_list(&self, _mode: &NavMode) -> Vec<String> {
-        self.get_dynamic_visible_items()
     }
 
     pub fn move_selection_up(&mut self) {
@@ -251,7 +250,9 @@ impl AppState {
             let (can_expand, already_expanded) = {
                 let s = self.sessions.get(&sel).unwrap();
                 let num_windows = s.windows.len();
-                let total_panes: usize = s.windows.iter()
+                let total_panes: usize = s
+                    .windows
+                    .iter()
                     .filter_map(|wid| self.windows.get(wid))
                     .map(|w| w.panes.len())
                     .sum();
@@ -294,37 +295,6 @@ impl AppState {
         // Panes are leaves — nothing to expand
     }
 
-    fn ensure_selected_expanded(&mut self) {
-        let sel = match self.focus.selected_id.clone() {
-            Some(s) => s,
-            None => return,
-        };
-
-        if let Some(window) = self.windows.get(&sel).cloned() {
-            if let Some(session) = self.sessions.get_mut(&window.session_id) {
-                session.expanded = true;
-            }
-        } else if let Some(pane) = self.panes.get(&sel).cloned() {
-            let wid = pane.window_id.clone();
-            if let Some(window) = self.windows.get_mut(&wid) {
-                if window.panes.len() > 1 {
-                    window.expanded = true;
-                }
-                let sid = window.session_id.clone();
-                if let Some(session) = self.sessions.get_mut(&sid) {
-                    let num_windows = session.windows.len();
-                    let total_panes: usize = session.windows.iter()
-                        .filter_map(|wid2| self.windows.get(wid2))
-                        .map(|w| w.panes.len())
-                        .sum();
-                    if num_windows > 1 || total_panes > 1 {
-                        session.expanded = true;
-                    }
-                }
-            }
-        }
-    }
-
     pub fn toggle_expansion(&mut self) {
         if let Some(sel) = &self.focus.selected_id {
             if let Some(session) = self.sessions.get_mut(sel) {
@@ -348,6 +318,7 @@ pub struct Session {
 
 #[derive(Debug, Clone)]
 pub struct Window {
+    #[allow(dead_code)]
     pub id: WindowId,
     pub session_id: SessionId,
     pub name: String,
@@ -372,9 +343,7 @@ pub struct EmbeddedTerminal {
 
 impl std::fmt::Debug for EmbeddedTerminal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("EmbeddedTerminal")
-            .field("target_id", &self.target_id)
-            .finish()
+        f.debug_struct("EmbeddedTerminal").field("target_id", &self.target_id).finish()
     }
 }
 
@@ -385,16 +354,24 @@ pub struct Pane {
     pub title: String,
     pub current_command: String,
     pub active: bool,
+    #[allow(dead_code)]
     pub region: Option<Rect>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum InputMode {
     TuiNormal,
-    Renaming { session_id: SessionId, input: String },
-    NewSession { input: String },
+    Renaming {
+        session_id: SessionId,
+        input: String,
+    },
+    NewSession {
+        input: String,
+    },
     #[allow(dead_code)]
-    PtyPassthrough { pane_id: PaneId },
+    PtyPassthrough {
+        pane_id: PaneId,
+    },
     #[allow(dead_code)]
     FuzzySearch,
     #[allow(dead_code)]
@@ -409,7 +386,6 @@ pub struct Focus {
     pub scroll_offset: usize,
     pub enable_scrolling: bool,
 }
-
 
 impl AppState {
     pub fn get_visible_list(&self) -> Vec<String> {

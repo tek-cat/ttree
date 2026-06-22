@@ -54,11 +54,13 @@ Two ways to get the binary onto the phone:
   chmod +x "$PREFIX/bin/ttree"
   ```
 
-- **Build it yourself** on a laptop (needs `rustup` and Android NDK r28), then copy the binary over:
+- **Build it yourself.** No special dependency handling is needed: the tree builds for `aarch64-linux-android` as-is (no patches, no vendored crates). Cross-build on a laptop with `rustup` + Android NDK r28, then copy the binary over:
 
   ```sh
   scripts/build-android.sh                      # -> target/aarch64-linux-android/release/ttree
   ```
+
+  Building natively inside Termux (`cargo build --release`) works too, but it is RAM- and disk-hungry on smaller phones, so the prebuilt binary above is usually the easier path.
 
 In Termux, the install prefix is `$PREFIX/bin` (`/data/data/com.termux/files/usr/bin`). You also need `tmux` on the phone (`pkg install tmux`).
 
