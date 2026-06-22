@@ -46,20 +46,26 @@ impl<'a> Widget for TreeWidget<'a> {
             }
 
             let num_windows = session.windows.len();
-            let total_panes: usize = session.windows.iter()
+            let total_panes: usize = session
+                .windows
+                .iter()
                 .filter_map(|wid| self.state.windows.get(wid))
                 .map(|w| w.panes.len())
                 .sum();
 
             if num_windows <= 1 && total_panes <= 1 {
                 // ── Case A: single leaf row ──────────────────────────────────
-                let leaf_id = session.windows.first()
+                let leaf_id = session
+                    .windows
+                    .first()
                     .and_then(|wid| self.state.windows.get(wid))
                     .and_then(|w| w.panes.first())
                     .cloned()
                     .unwrap_or(session.id.clone());
 
-                let pane = session.windows.first()
+                let pane = session
+                    .windows
+                    .first()
                     .and_then(|wid| self.state.windows.get(wid))
                     .and_then(|w| w.panes.first())
                     .and_then(|pid| self.state.panes.get(pid));
@@ -79,7 +85,6 @@ impl<'a> Widget for TreeWidget<'a> {
                     y += 1;
                 }
                 line_idx += 1;
-
             } else if num_windows == 1 {
                 // ── Case B: session header + panes directly ──────────────────
                 let is_sel = Some(&session.id) == self.state.focus.selected_id.as_ref();
@@ -102,8 +107,8 @@ impl<'a> Widget for TreeWidget<'a> {
                 line_idx += 1;
 
                 if session.expanded {
-                    if let Some(window) = session.windows.first()
-                        .and_then(|wid| self.state.windows.get(wid))
+                    if let Some(window) =
+                        session.windows.first().and_then(|wid| self.state.windows.get(wid))
                     {
                         let num_panes = window.panes.len();
                         for (idx, pid) in window.panes.iter().enumerate() {
@@ -112,10 +117,15 @@ impl<'a> Widget for TreeWidget<'a> {
                             }
                             if let Some(pane) = self.state.panes.get(pid) {
                                 if line_idx >= scroll {
-                                    let is_psel = Some(pid) == self.state.focus.selected_id.as_ref();
+                                    let is_psel =
+                                        Some(pid) == self.state.focus.selected_id.as_ref();
                                     let style = sel_style(is_psel);
                                     let fg = if pane.active { Color::Cyan } else { Color::Reset };
-                                    let connector = if idx == num_panes - 1 { "  └─ " } else { "  ├─ " };
+                                    let connector = if idx == num_panes - 1 {
+                                        "  └─ "
+                                    } else {
+                                        "  ├─ "
+                                    };
                                     let line = Line::from(vec![
                                         Span::styled(connector, style),
                                         Span::styled(pane_name(pane).to_string(), style.fg(fg)),
@@ -128,7 +138,6 @@ impl<'a> Widget for TreeWidget<'a> {
                         }
                     }
                 }
-
             } else {
                 // ── Case C: full hierarchy ───────────────────────────────────
                 let is_sel = Some(&session.id) == self.state.focus.selected_id.as_ref();
@@ -161,10 +170,13 @@ impl<'a> Widget for TreeWidget<'a> {
                             if num_panes <= 1 {
                                 // Window is a leaf — show pane name
                                 let leaf_id = window.panes.first().cloned().unwrap_or(wid.clone());
-                                let is_wsel = Some(&leaf_id) == self.state.focus.selected_id.as_ref();
+                                let is_wsel =
+                                    Some(&leaf_id) == self.state.focus.selected_id.as_ref();
                                 if line_idx >= scroll {
                                     let style = sel_style(is_wsel);
-                                    let (label, is_active) = window.panes.first()
+                                    let (label, is_active) = window
+                                        .panes
+                                        .first()
                                         .and_then(|pid| self.state.panes.get(pid))
                                         .map(|p| (pane_name(p).to_string(), p.active))
                                         .unwrap_or_else(|| (window.name.clone(), window.active));
@@ -185,7 +197,10 @@ impl<'a> Widget for TreeWidget<'a> {
                                     let fg = if window.active { Color::Cyan } else { Color::Reset };
                                     let wicon = if window.expanded { "▼" } else { "▶" };
                                     let line = Line::from(vec![
-                                        Span::styled(format!("  {} ", wicon), style.fg(Color::Yellow)),
+                                        Span::styled(
+                                            format!("  {} ", wicon),
+                                            style.fg(Color::Yellow),
+                                        ),
                                         Span::styled(window.name.clone(), style.fg(fg)),
                                     ]);
                                     buf.set_line(area.x, y, &line, area.width);
@@ -200,13 +215,25 @@ impl<'a> Widget for TreeWidget<'a> {
                                         }
                                         if let Some(pane) = self.state.panes.get(pid) {
                                             if line_idx >= scroll {
-                                                let is_psel = Some(pid) == self.state.focus.selected_id.as_ref();
+                                                let is_psel = Some(pid)
+                                                    == self.state.focus.selected_id.as_ref();
                                                 let style = sel_style(is_psel);
-                                                let fg = if pane.active { Color::Cyan } else { Color::Reset };
-                                                let connector = if idx == num_panes - 1 { "    └─ " } else { "    ├─ " };
+                                                let fg = if pane.active {
+                                                    Color::Cyan
+                                                } else {
+                                                    Color::Reset
+                                                };
+                                                let connector = if idx == num_panes - 1 {
+                                                    "    └─ "
+                                                } else {
+                                                    "    ├─ "
+                                                };
                                                 let line = Line::from(vec![
                                                     Span::styled(connector, style),
-                                                    Span::styled(pane_name(pane).to_string(), style.fg(fg)),
+                                                    Span::styled(
+                                                        pane_name(pane).to_string(),
+                                                        style.fg(fg),
+                                                    ),
                                                 ]);
                                                 buf.set_line(area.x, y, &line, area.width);
                                                 y += 1;

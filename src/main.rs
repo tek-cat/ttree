@@ -8,15 +8,19 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
+use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use ratatui::{backend::CrosstermBackend, Terminal};
-use std::{io, time::Duration, sync::{Arc, RwLock}};
-use portable_pty::{CommandBuilder, native_pty_system, PtySize};
+use std::{
+    io,
+    sync::{Arc, RwLock},
+    time::Duration,
+};
 
 mod state;
 mod tmux_client;
 mod ui;
 
-use crate::state::{AppState, Panel, EmbeddedTerminal};
+use crate::state::{AppState, EmbeddedTerminal, Panel};
 use crate::tmux_client::Tmux;
 
 fn setup_panic_hook() {
@@ -35,11 +39,8 @@ fn setup_panic_hook() {
 }
 
 async fn sync_state(state: &mut AppState) -> Result<bool> {
-    let (sessions_raw, windows_raw, panes_raw) = tokio::join!(
-        Tmux::list_sessions(),
-        Tmux::list_windows(),
-        Tmux::list_panes()
-    );
+    let (sessions_raw, windows_raw, panes_raw) =
+        tokio::join!(Tmux::list_sessions(), Tmux::list_windows(), Tmux::list_panes());
 
     let sessions_raw = sessions_raw.unwrap_or_default();
     let windows_raw = windows_raw.unwrap_or_default();
@@ -47,14 +48,10 @@ async fn sync_state(state: &mut AppState) -> Result<bool> {
 
     let old_panes: std::collections::HashSet<String> = state.panes.keys().cloned().collect();
 
-    let mut expanded_ids: std::collections::HashSet<String> = state.sessions.iter()
-        .filter(|(_, s)| s.expanded)
-        .map(|(id, _)| id.clone())
-        .collect();
-    expanded_ids.extend(state.windows.iter()
-        .filter(|(_, w)| w.expanded)
-        .map(|(id, _)| id.clone()));
-    
+    let mut expanded_ids: std::collections::HashSet<String> =
+        state.sessions.iter().filter(|(_, s)| s.expanded).map(|(id, _)| id.clone()).collect();
+    expanded_ids.extend(state.windows.iter().filter(|(_, w)| w.expanded).map(|(id, _)| id.clone()));
+
     let is_initial_load = state.sessions.is_empty();
 
     // If we just loaded from disk and have no sessions yet, use the pre-loaded expanded_ids
@@ -76,14 +73,17 @@ async fn sync_state(state: &mut AppState) -> Result<bool> {
                 expanded_ids.contains(&id)
             };
 
-            state.sessions.insert(id.clone(), crate::state::Session {
-                id: id.clone(),
-                name: parts[1].to_string(),
-                windows: Vec::new(),
-                expanded,
-                last_attached: parts[2].parse().unwrap_or(0),
-                attached: parts[3] == "1",
-            });
+            state.sessions.insert(
+                id.clone(),
+                crate::state::Session {
+                    id: id.clone(),
+                    name: parts[1].to_string(),
+                    windows: Vec::new(),
+                    expanded,
+                    last_attached: parts[2].parse().unwrap_or(0),
+                    attached: parts[3] == "1",
+                },
+            );
         }
     }
 
@@ -92,23 +92,26 @@ async fn sync_state(state: &mut AppState) -> Result<bool> {
         if parts.len() >= 6 {
             let id = parts[0].to_string();
             let session_id = parts[1].to_string();
-            
+
             let expanded = if is_initial_load && state.expanded_ids.is_empty() {
                 true // Default to expanded on very first run
             } else {
                 expanded_ids.contains(&id)
             };
 
-            state.windows.insert(id.clone(), crate::state::Window {
-                id: id.clone(),
-                session_id: session_id.clone(),
-                name: parts[2].to_string(),
-                panes: Vec::new(),
-                active: parts[3] == "1",
-                width: parts[4].parse().unwrap_or(80),
-                height: parts[5].parse().unwrap_or(24),
-                expanded,
-            });
+            state.windows.insert(
+                id.clone(),
+                crate::state::Window {
+                    id: id.clone(),
+                    session_id: session_id.clone(),
+                    name: parts[2].to_string(),
+                    panes: Vec::new(),
+                    active: parts[3] == "1",
+                    width: parts[4].parse().unwrap_or(80),
+                    height: parts[5].parse().unwrap_or(24),
+                    expanded,
+                },
+            );
             if let Some(session) = state.sessions.get_mut(&session_id) {
                 session.windows.push(id);
             }
@@ -124,21 +127,24 @@ async fn sync_state(state: &mut AppState) -> Result<bool> {
             let top = parts[6].parse().unwrap_or(0);
             let width = parts[7].parse().unwrap_or(0);
             let height = parts[8].parse().unwrap_or(0);
-            
-            state.panes.insert(id.clone(), crate::state::Pane {
-                id: id.clone(),
-                window_id: window_id.clone(),
-                title: parts[2].to_string(),
-                current_command: parts[3].to_string(),
-                active: parts[4] == "1",
-                region: Some(ratatui::layout::Rect::new(left, top, width, height)),
-            });
+
+            state.panes.insert(
+                id.clone(),
+                crate::state::Pane {
+                    id: id.clone(),
+                    window_id: window_id.clone(),
+                    title: parts[2].to_string(),
+                    current_command: parts[3].to_string(),
+                    active: parts[4] == "1",
+                    region: Some(ratatui::layout::Rect::new(left, top, width, height)),
+                },
+            );
             if let Some(window) = state.windows.get_mut(&window_id) {
                 window.panes.push(id);
             }
         }
     }
-    
+
     let new_panes: std::collections::HashSet<String> = state.panes.keys().cloned().collect();
     let changed = old_panes != new_panes;
 
@@ -154,7 +160,9 @@ async fn sync_state(state: &mut AppState) -> Result<bool> {
         // Try to find the most appropriate active pane to focus
         let mut active_pane = if let Ok(current_pane) = std::env::var("TMUX_PANE") {
             state.panes.get(&current_pane).cloned()
-        } else { None };
+        } else {
+            None
+        };
 
         // 2. Try the last target we attached to in this ttree session
         if active_pane.is_none() {
@@ -162,15 +170,21 @@ async fn sync_state(state: &mut AppState) -> Result<bool> {
                 if let Some(p) = state.panes.get(target_id) {
                     active_pane = Some(p.clone());
                 } else if let Some(w) = state.windows.get(target_id) {
-                    active_pane = w.panes.iter()
+                    active_pane = w
+                        .panes
+                        .iter()
                         .find_map(|pid| state.panes.get(pid).filter(|p| p.active))
                         .cloned();
                 } else if let Some(s) = state.sessions.get(target_id) {
-                    active_pane = s.windows.iter()
+                    active_pane = s
+                        .windows
+                        .iter()
                         .find_map(|wid| {
-                            state.windows.get(wid)
-                                .filter(|w| w.active)
-                                .and_then(|w| w.panes.iter().find_map(|pid| state.panes.get(pid).filter(|p| p.active)))
+                            state.windows.get(wid).filter(|w| w.active).and_then(|w| {
+                                w.panes
+                                    .iter()
+                                    .find_map(|pid| state.panes.get(pid).filter(|p| p.active))
+                            })
                         })
                         .cloned();
                 }
@@ -179,20 +193,24 @@ async fn sync_state(state: &mut AppState) -> Result<bool> {
 
         // 3. Fallback to sorting by last_attached
         if active_pane.is_none() {
-            let mut active_panes: Vec<_> = state.panes.values()
+            let mut active_panes: Vec<_> = state
+                .panes
+                .values()
                 .filter(|p| {
                     p.active && state.windows.get(&p.window_id).map(|w| w.active).unwrap_or(false)
                 })
                 .collect();
-            
+
             // Sort by session activity to pick the most recently active one
             active_panes.sort_by(|a, b| {
-                let sess_a = state.windows.get(&a.window_id).and_then(|w| state.sessions.get(&w.session_id));
-                let sess_b = state.windows.get(&b.window_id).and_then(|w| state.sessions.get(&w.session_id));
-                
+                let sess_a =
+                    state.windows.get(&a.window_id).and_then(|w| state.sessions.get(&w.session_id));
+                let sess_b =
+                    state.windows.get(&b.window_id).and_then(|w| state.sessions.get(&w.session_id));
+
                 let time_a = sess_a.map(|s| s.last_attached).unwrap_or(0);
                 let time_b = sess_b.map(|s| s.last_attached).unwrap_or(0);
-                
+
                 if time_a != time_b {
                     return time_b.cmp(&time_a); // Newest first
                 }
@@ -244,28 +262,41 @@ async fn main() -> Result<()> {
     }
 }
 
-fn encode_mouse(mouse: &crossterm::event::MouseEvent, x_offset: u16, y_offset: u16) -> Option<Vec<u8>> {
+fn encode_mouse(
+    mouse: &crossterm::event::MouseEvent,
+    x_offset: u16,
+    y_offset: u16,
+) -> Option<Vec<u8>> {
     use crossterm::event::{MouseButton, MouseEventKind};
 
     let col = mouse.column.saturating_sub(x_offset) + 1;
     let row = mouse.row.saturating_sub(y_offset) + 1;
 
     let (base_button, release) = match mouse.kind {
-        MouseEventKind::Down(btn) => (match btn {
-            MouseButton::Left => 0u32,
-            MouseButton::Middle => 1,
-            MouseButton::Right => 2,
-        }, false),
-        MouseEventKind::Up(btn) => (match btn {
-            MouseButton::Left => 0u32,
-            MouseButton::Middle => 1,
-            MouseButton::Right => 2,
-        }, true),
-        MouseEventKind::Drag(btn) => (match btn {
-            MouseButton::Left => 32u32,
-            MouseButton::Middle => 33,
-            MouseButton::Right => 34,
-        }, false),
+        MouseEventKind::Down(btn) => (
+            match btn {
+                MouseButton::Left => 0u32,
+                MouseButton::Middle => 1,
+                MouseButton::Right => 2,
+            },
+            false,
+        ),
+        MouseEventKind::Up(btn) => (
+            match btn {
+                MouseButton::Left => 0u32,
+                MouseButton::Middle => 1,
+                MouseButton::Right => 2,
+            },
+            true,
+        ),
+        MouseEventKind::Drag(btn) => (
+            match btn {
+                MouseButton::Left => 32u32,
+                MouseButton::Middle => 33,
+                MouseButton::Right => 34,
+            },
+            false,
+        ),
         MouseEventKind::Moved => (35, false),
         MouseEventKind::ScrollUp => (64, false),
         MouseEventKind::ScrollDown => (65, false),
@@ -273,9 +304,15 @@ fn encode_mouse(mouse: &crossterm::event::MouseEvent, x_offset: u16, y_offset: u
     };
 
     let mut button = base_button;
-    if mouse.modifiers.contains(crossterm::event::KeyModifiers::SHIFT) { button += 4; }
-    if mouse.modifiers.contains(crossterm::event::KeyModifiers::ALT)   { button += 8; }
-    if mouse.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) { button += 16; }
+    if mouse.modifiers.contains(crossterm::event::KeyModifiers::SHIFT) {
+        button += 4;
+    }
+    if mouse.modifiers.contains(crossterm::event::KeyModifiers::ALT) {
+        button += 8;
+    }
+    if mouse.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) {
+        button += 16;
+    }
 
     let suffix = if release { 'm' } else { 'M' };
     Some(format!("\x1b[<{};{};{}{}", button, col, row, suffix).into_bytes())
@@ -302,8 +339,7 @@ fn should_forward_mouse(kind: &MouseEventKind, mode: vt100::MouseProtocolMode) -
 }
 
 fn base64_encode(data: &[u8]) -> String {
-    const T: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
     for chunk in data.chunks(3) {
         let b0 = chunk[0] as u32;
@@ -312,16 +348,8 @@ fn base64_encode(data: &[u8]) -> String {
         let n = (b0 << 16) | (b1 << 8) | b2;
         out.push(T[((n >> 18) & 0x3f) as usize] as char);
         out.push(T[((n >> 12) & 0x3f) as usize] as char);
-        out.push(if chunk.len() > 1 {
-            T[((n >> 6) & 0x3f) as usize] as char
-        } else {
-            '='
-        });
-        out.push(if chunk.len() > 2 {
-            T[(n & 0x3f) as usize] as char
-        } else {
-            '='
-        });
+        out.push(if chunk.len() > 1 { T[((n >> 6) & 0x3f) as usize] as char } else { '=' });
+        out.push(if chunk.len() > 2 { T[(n & 0x3f) as usize] as char } else { '=' });
     }
     out
 }
@@ -333,11 +361,7 @@ fn osc52_copy(text: &str) {
     let _ = stdout.flush();
 }
 
-fn extract_selection_text(
-    parser: &vt100::Parser,
-    anchor: (u16, u16),
-    head: (u16, u16),
-) -> String {
+fn extract_selection_text(parser: &vt100::Parser, anchor: (u16, u16), head: (u16, u16)) -> String {
     let (start, end) = if anchor <= head { (anchor, head) } else { (head, anchor) };
     let (rows, cols) = parser.screen().size();
     if start.0 >= rows {
@@ -347,16 +371,20 @@ fn extract_selection_text(
     // contents_between treats end_col as exclusive; we want to include the
     // cell under the head, so add 1 (clamped to width).
     let end_col_exclusive = (end.1 + 1).min(cols);
-    parser
-        .screen()
-        .contents_between(start.0, start.1, end_row, end_col_exclusive)
+    parser.screen().contents_between(start.0, start.1, end_row, end_col_exclusive)
 }
 
 fn modifier_code(mods: KeyModifiers) -> u8 {
     let mut m = 1u8;
-    if mods.contains(KeyModifiers::SHIFT) { m += 1; }
-    if mods.contains(KeyModifiers::ALT) { m += 2; }
-    if mods.contains(KeyModifiers::CONTROL) { m += 4; }
+    if mods.contains(KeyModifiers::SHIFT) {
+        m += 1;
+    }
+    if mods.contains(KeyModifiers::ALT) {
+        m += 2;
+    }
+    if mods.contains(KeyModifiers::CONTROL) {
+        m += 4;
+    }
     m
 }
 
@@ -385,7 +413,9 @@ fn encode_key(key: &crossterm::event::KeyEvent, bytes: &mut Vec<u8>) {
 
     match key.code {
         KeyCode::Char(c) => {
-            if alt { bytes.push(0x1b); }
+            if alt {
+                bytes.push(0x1b);
+            }
             if ctrl {
                 let lc = c.to_ascii_lowercase();
                 if lc.is_ascii_lowercase() {
@@ -429,8 +459,14 @@ fn encode_key(key: &crossterm::event::KeyEvent, bytes: &mut Vec<u8>) {
             if mods.contains(KeyModifiers::SHIFT) {
                 bytes.extend_from_slice(format!("\x1b[127;{}u", m).as_bytes());
             } else {
-                if alt { bytes.push(0x1b); }
-                if ctrl { bytes.push(0x08); } else { bytes.push(127); }
+                if alt {
+                    bytes.push(0x1b);
+                }
+                if ctrl {
+                    bytes.push(0x08);
+                } else {
+                    bytes.push(127);
+                }
             }
         }
         KeyCode::Tab => {
@@ -450,7 +486,9 @@ fn encode_key(key: &crossterm::event::KeyEvent, bytes: &mut Vec<u8>) {
                 bytes.extend_from_slice(b"\x1b[Z");
             } else {
                 let mut bm = m;
-                if !mods.contains(KeyModifiers::SHIFT) { bm += 1; }
+                if !mods.contains(KeyModifiers::SHIFT) {
+                    bm += 1;
+                }
                 bytes.extend_from_slice(format!("\x1b[9;{}u", bm).as_bytes());
             }
         }
@@ -467,9 +505,18 @@ fn encode_key(key: &crossterm::event::KeyEvent, bytes: &mut Vec<u8>) {
         KeyCode::F(n) => {
             if m == 1 {
                 let s = match n {
-                    1 => "\x1bOP", 2 => "\x1bOQ", 3 => "\x1bOR", 4 => "\x1bOS",
-                    5 => "\x1b[15~", 6 => "\x1b[17~", 7 => "\x1b[18~", 8 => "\x1b[19~",
-                    9 => "\x1b[20~", 10 => "\x1b[21~", 11 => "\x1b[23~", 12 => "\x1b[24~",
+                    1 => "\x1bOP",
+                    2 => "\x1bOQ",
+                    3 => "\x1bOR",
+                    4 => "\x1bOS",
+                    5 => "\x1b[15~",
+                    6 => "\x1b[17~",
+                    7 => "\x1b[18~",
+                    8 => "\x1b[19~",
+                    9 => "\x1b[20~",
+                    10 => "\x1b[21~",
+                    11 => "\x1b[23~",
+                    12 => "\x1b[24~",
                     _ => "",
                 };
                 bytes.extend_from_slice(s.as_bytes());
@@ -572,12 +619,16 @@ async fn run_app(state: &mut AppState) -> Result<()> {
                                         Some(current_pane)
                                     } else {
                                         visible.into_iter().find(|id| {
-                                            if id == &current_session { return true; }
+                                            if id == &current_session {
+                                                return true;
+                                            }
                                             if let Some(w) = state.windows.get(id) {
                                                 return w.session_id == current_session;
                                             }
                                             if let Some(p) = state.panes.get(id) {
-                                                return state.windows.get(&p.window_id)
+                                                return state
+                                                    .windows
+                                                    .get(&p.window_id)
                                                     .map(|w| w.session_id == current_session)
                                                     .unwrap_or(false);
                                             }
@@ -612,7 +663,8 @@ async fn run_app(state: &mut AppState) -> Result<()> {
                 let rows = current_size.height.saturating_sub(1);
                 if cols > 0 && rows > 0 {
                     if let Ok(master) = term.pty_master.lock() {
-                        let _ = master.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
+                        let _ =
+                            master.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
                     }
                     if let Ok(mut parser) = term.parser.write() {
                         parser.screen_mut().set_size(rows, cols);
@@ -631,7 +683,7 @@ async fn run_app(state: &mut AppState) -> Result<()> {
                 if let Some(term) = &mut active_terminal {
                     let target_id_clone = target_id.clone();
                     term.target_id = target_id.clone();
-                    
+
                     if let Some(pid) = term.pty_pid {
                         if let Some(prev) = current_switch_task.take() {
                             prev.abort();
@@ -652,7 +704,7 @@ async fn run_app(state: &mut AppState) -> Result<()> {
                                         break;
                                     }
                                 }
-                                
+
                                 if let Some(tty) = client_tty {
                                     let mut cmd = tokio::process::Command::new("tmux");
                                     cmd.args(["switch-client", "-c", &tty, "-t", &target_id_clone]);
@@ -667,23 +719,28 @@ async fn run_app(state: &mut AppState) -> Result<()> {
 
                     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
                     let parser = Arc::new(RwLock::new(vt100::Parser::new(rows, cols, 0)));
-                    
+
                     let pty_system = native_pty_system();
                     let pty_rows = if rows > 0 { rows } else { 24 };
                     let pty_cols = if cols > 0 { cols } else { 80 };
 
-                    if let Ok(pair) = pty_system.openpty(PtySize { rows: pty_rows, cols: pty_cols, pixel_width: 0, pixel_height: 0 }) {
+                    if let Ok(pair) = pty_system.openpty(PtySize {
+                        rows: pty_rows,
+                        cols: pty_cols,
+                        pixel_width: 0,
+                        pixel_height: 0,
+                    }) {
                         let mut cmd = CommandBuilder::new("tmux");
                         // Unset TMUX to prevent nesting issues in the preview
                         cmd.env("TMUX", "");
                         cmd.env("TMUX_PANE", "");
                         let target_id_clone = target_id.clone();
                         cmd.args(["attach-session", "-t", &target_id_clone]);
-                        
+
                         if let Ok(mut child) = pair.slave.spawn_command(cmd) {
                             let pid = child.process_id();
                             drop(pair.slave);
-                            
+
                             let mut reader = pair.master.try_clone_reader().unwrap();
                             let mut writer = pair.master.take_writer().unwrap();
 
@@ -733,11 +790,7 @@ async fn run_app(state: &mut AppState) -> Result<()> {
         }
 
         // Clean up pty_task if it finished
-        let task_finished = if let Some(task) = &pty_task {
-            task.is_finished()
-        } else {
-            false
-        };
+        let task_finished = if let Some(task) = &pty_task { task.is_finished() } else { false };
         if task_finished {
             pty_task = None;
             active_terminal = None;
@@ -781,7 +834,9 @@ async fn run_app(state: &mut AppState) -> Result<()> {
                     const TREE_Y_START: u16 = 1; // block title row
                     match mouse.kind {
                         MouseEventKind::Down(MouseButton::Left) => {
-                            if mouse.row >= TREE_Y_START && mouse.row < current_size.height.saturating_sub(1) {
+                            if mouse.row >= TREE_Y_START
+                                && mouse.row < current_size.height.saturating_sub(1)
+                            {
                                 let relative_row = (mouse.row - TREE_Y_START) as usize;
                                 let logical_idx = relative_row + state.focus.scroll_offset;
                                 let visible = state.get_dynamic_visible_items();
@@ -828,9 +883,7 @@ async fn run_app(state: &mut AppState) -> Result<()> {
                         let max_row = vt_rows.saturating_sub(1);
                         let max_col = vt_cols.saturating_sub(1);
                         let vt_row = mouse.row.min(max_row);
-                        let vt_col = mouse.column
-                            .saturating_sub(state.sidebar_cols)
-                            .min(max_col);
+                        let vt_col = mouse.column.saturating_sub(state.sidebar_cols).min(max_col);
 
                         let mut handled = false;
                         if no_mods && vt_rows > 0 && vt_cols > 0 {
@@ -842,7 +895,8 @@ async fn run_app(state: &mut AppState) -> Result<()> {
                                 }
                                 MouseEventKind::Drag(MouseButton::Left) => {
                                     let anchor = if let Some(d) = pending_pty_down.take() {
-                                        let ax = d.column
+                                        let ax = d
+                                            .column
                                             .saturating_sub(state.sidebar_cols)
                                             .min(max_col);
                                         let ay = d.row.min(max_row);
@@ -852,10 +906,11 @@ async fn run_app(state: &mut AppState) -> Result<()> {
                                     } else {
                                         (vt_row, vt_col)
                                     };
-                                    state.preview_selection = Some(crate::state::PreviewSelection {
-                                        anchor,
-                                        head: (vt_row, vt_col),
-                                    });
+                                    state.preview_selection =
+                                        Some(crate::state::PreviewSelection {
+                                            anchor,
+                                            head: (vt_row, vt_col),
+                                        });
                                     handled = true;
                                 }
                                 MouseEventKind::Up(MouseButton::Left) => {
@@ -875,12 +930,16 @@ async fn run_app(state: &mut AppState) -> Result<()> {
                                         // suppressed Down, then forward Up, but
                                         // only if the app is tracking the mouse.
                                         if should_forward_mouse(&down.kind, mouse_mode) {
-                                            if let Some(bytes) = encode_mouse(&down, x_offset, y_offset) {
+                                            if let Some(bytes) =
+                                                encode_mouse(&down, x_offset, y_offset)
+                                            {
                                                 let _ = term.pty_writer.send(bytes);
                                             }
                                         }
                                         if should_forward_mouse(&mouse.kind, mouse_mode) {
-                                            if let Some(bytes) = encode_mouse(&mouse, x_offset, y_offset) {
+                                            if let Some(bytes) =
+                                                encode_mouse(&mouse, x_offset, y_offset)
+                                            {
                                                 let _ = term.pty_writer.send(bytes);
                                             }
                                         }
@@ -917,17 +976,23 @@ async fn run_app(state: &mut AppState) -> Result<()> {
                 if let crate::state::InputMode::Renaming { .. } = &state.input_mode {
                     match key.code {
                         KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                            if let crate::state::InputMode::Renaming { input, .. } = &mut state.input_mode {
+                            if let crate::state::InputMode::Renaming { input, .. } =
+                                &mut state.input_mode
+                            {
                                 input.push(c);
                             }
                         }
                         KeyCode::Backspace => {
-                            if let crate::state::InputMode::Renaming { input, .. } = &mut state.input_mode {
+                            if let crate::state::InputMode::Renaming { input, .. } =
+                                &mut state.input_mode
+                            {
                                 input.pop();
                             }
                         }
                         KeyCode::Enter => {
-                            if let crate::state::InputMode::Renaming { session_id, input } = state.input_mode.clone() {
+                            if let crate::state::InputMode::Renaming { session_id, input } =
+                                state.input_mode.clone()
+                            {
                                 let trimmed = input.trim().to_string();
                                 if !trimmed.is_empty() {
                                     let _ = tokio::process::Command::new("tmux")
@@ -950,17 +1015,23 @@ async fn run_app(state: &mut AppState) -> Result<()> {
                 if let crate::state::InputMode::NewSession { .. } = &state.input_mode {
                     match key.code {
                         KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                            if let crate::state::InputMode::NewSession { input } = &mut state.input_mode {
+                            if let crate::state::InputMode::NewSession { input } =
+                                &mut state.input_mode
+                            {
                                 input.push(c);
                             }
                         }
                         KeyCode::Backspace => {
-                            if let crate::state::InputMode::NewSession { input } = &mut state.input_mode {
+                            if let crate::state::InputMode::NewSession { input } =
+                                &mut state.input_mode
+                            {
                                 input.pop();
                             }
                         }
                         KeyCode::Enter => {
-                            if let crate::state::InputMode::NewSession { input } = state.input_mode.clone() {
+                            if let crate::state::InputMode::NewSession { input } =
+                                state.input_mode.clone()
+                            {
                                 let trimmed = input.trim().to_string();
                                 if !trimmed.is_empty() {
                                     let _ = tokio::process::Command::new("tmux")
@@ -979,7 +1050,8 @@ async fn run_app(state: &mut AppState) -> Result<()> {
                     continue;
                 }
 
-                if key.code == KeyCode::Char('p') && key.modifiers.contains(KeyModifiers::CONTROL)
+                if key.code == KeyCode::Char('p')
+                    && key.modifiers.contains(KeyModifiers::CONTROL)
                     && state.focus.panel == Panel::Tree
                 {
                     state.focus.panel = Panel::Preview;
@@ -989,7 +1061,10 @@ async fn run_app(state: &mut AppState) -> Result<()> {
                 if state.focus.panel == Panel::Tree {
                     if state.show_help {
                         match key.code {
-                            KeyCode::Char('q') | KeyCode::Esc | KeyCode::Enter | KeyCode::Char('?') => {
+                            KeyCode::Char('q')
+                            | KeyCode::Esc
+                            | KeyCode::Enter
+                            | KeyCode::Char('?') => {
                                 state.show_help = false;
                             }
                             _ => {}
@@ -1055,9 +1130,8 @@ async fn run_app(state: &mut AppState) -> Result<()> {
                             state.save_to_disk();
                         }
                         KeyCode::Char('n') => {
-                            state.input_mode = crate::state::InputMode::NewSession {
-                                input: String::new(),
-                            };
+                            state.input_mode =
+                                crate::state::InputMode::NewSession { input: String::new() };
                         }
                         KeyCode::Char('r') => {
                             let session_id = state.focus.selected_id.as_ref().and_then(|sel| {
@@ -1072,7 +1146,9 @@ async fn run_app(state: &mut AppState) -> Result<()> {
                                 }
                             });
                             if let Some(sid) = session_id {
-                                let current_name = state.sessions.get(&sid)
+                                let current_name = state
+                                    .sessions
+                                    .get(&sid)
                                     .map(|s| s.name.clone())
                                     .unwrap_or_default();
                                 state.input_mode = crate::state::InputMode::Renaming {
@@ -1086,7 +1162,9 @@ async fn run_app(state: &mut AppState) -> Result<()> {
                 } else if state.focus.panel == Panel::Preview {
                     if prefix_pending {
                         prefix_pending = false;
-                        if key.code == KeyCode::Char('d') && !key.modifiers.contains(KeyModifiers::CONTROL) {
+                        if key.code == KeyCode::Char('d')
+                            && !key.modifiers.contains(KeyModifiers::CONTROL)
+                        {
                             state.focus.panel = Panel::Tree;
                         } else if let Some(term) = &active_terminal {
                             // Forward the swallowed Ctrl+B and then this key
@@ -1096,7 +1174,9 @@ async fn run_app(state: &mut AppState) -> Result<()> {
                                 let _ = term.pty_writer.send(bytes);
                             }
                         }
-                    } else if key.code == KeyCode::Char('b') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                    } else if key.code == KeyCode::Char('b')
+                        && key.modifiers.contains(KeyModifiers::CONTROL)
+                    {
                         prefix_pending = true;
                     } else if let Some(term) = &active_terminal {
                         let mut bytes = Vec::new();
@@ -1112,10 +1192,7 @@ async fn run_app(state: &mut AppState) -> Result<()> {
 
     if let Some(term) = active_terminal.take() {
         if let Some(pid) = term.pty_pid {
-            let _ = tokio::process::Command::new("kill")
-                .arg(pid.to_string())
-                .output()
-                .await;
+            let _ = tokio::process::Command::new("kill").arg(pid.to_string()).output().await;
         }
     }
 
@@ -1137,9 +1214,7 @@ async fn run_app(state: &mut AppState) -> Result<()> {
         if std::env::var("TMUX").is_ok() {
             cmd.args(["switch-client", "-t", &target]);
         } else {
-            cmd.env_remove("TMUX")
-               .env_remove("TMUX_PANE")
-               .args(["attach-session", "-t", &target]);
+            cmd.env_remove("TMUX").env_remove("TMUX_PANE").args(["attach-session", "-t", &target]);
         }
         let mut child = cmd.spawn()?;
         let _ = child.wait().await;

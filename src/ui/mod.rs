@@ -31,11 +31,7 @@ pub fn render(
     preview_data: &Option<crate::state::EmbeddedTerminal>,
     last_error: &Option<String>,
 ) {
-    let chunks = Layout::vertical([
-        Constraint::Fill(1),
-        Constraint::Length(1),
-    ])
-    .split(frame.area());
+    let chunks = Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).split(frame.area());
 
     if let Some(err) = last_error {
         let error_p =
@@ -77,11 +73,8 @@ pub fn render(
     // just drew. Coordinates in PreviewSelection are vt100-local, so they get
     // offset by the preview area's origin and clipped to its rect.
     if let Some(sel) = &state.preview_selection {
-        let (start, end) = if sel.anchor <= sel.head {
-            (sel.anchor, sel.head)
-        } else {
-            (sel.head, sel.anchor)
-        };
+        let (start, end) =
+            if sel.anchor <= sel.head { (sel.anchor, sel.head) } else { (sel.head, sel.anchor) };
         let buf = frame.buffer_mut();
         let last_col = preview_area.width.saturating_sub(1);
         for vt_row in start.0..=end.0 {
@@ -103,32 +96,25 @@ pub fn render(
 
     // Command Bar - contextual based on panel mode
     let (cmd_text, mode_label) = match state.focus.panel {
-        crate::state::Panel::Tree => (
-            "SPACE toggle  ENTER preview  a attach  n new  r rename  ? help  Q quit",
-            "TREE",
-        ),
-        crate::state::Panel::Preview => (
-            "C-b d  back to tree    C-b <key>  pass prefix to tmux",
-            "PREVIEW",
-        ),
+        crate::state::Panel::Tree => {
+            ("SPACE toggle  ENTER preview  a attach  n new  r rename  ? help  Q quit", "TREE")
+        }
+        crate::state::Panel::Preview => {
+            ("C-b d  back to tree    C-b <key>  pass prefix to tmux", "PREVIEW")
+        }
     };
 
     // Green background for entire bar
-    let bg_rect = Paragraph::new("")
-        .style(Style::default().bg(Color::Green))
-        .block(Block::default());
+    let bg_rect =
+        Paragraph::new("").style(Style::default().bg(Color::Green)).block(Block::default());
     frame.render_widget(bg_rect, chunks[1]);
 
     // Render mode label
     let mode_bg = Color::Green;
     let mode_rect = Rect::new(chunks[1].x, chunks[1].y, mode_label.len() as u16 + 1, 1);
 
-    let tree_label = Paragraph::new(mode_label).style(
-        Style::default()
-            .bg(mode_bg)
-            .fg(Color::Black)
-            .add_modifier(Modifier::BOLD),
-    );
+    let tree_label = Paragraph::new(mode_label)
+        .style(Style::default().bg(mode_bg).fg(Color::Black).add_modifier(Modifier::BOLD));
     frame.render_widget(tree_label, mode_rect);
 
     // Render commands starting after the mode label (offset by mode label width + 1 for space)
