@@ -130,16 +130,11 @@
       margin-bottom: 1.25rem;
     }
 
-    .demo-placeholder {
-      background: var(--surface);
+    .demo-img {
+      width: 100%;
+      display: block;
       border: 1px solid var(--border);
       border-radius: 8px;
-      aspect-ratio: 16/9;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      color: var(--muted);
-      font-size: 0.9rem;
     }
 
     /* ── Features ── */
@@ -280,9 +275,8 @@
   <!-- Demo -->
   <section class="demo-section">
     <h2>Demo</h2>
-    <div class="demo-placeholder" id="demo-area">
-      video coming soon
-    </div>
+    <img class="demo-img" id="demo-area" src="screenshot.png"
+         alt="ttree showing the session tree and a live pane preview" />
   </section>
 
   <!-- Features -->
