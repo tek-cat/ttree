@@ -4,9 +4,9 @@
 # Screenshot path below lands in docs/.
 Output "hero-dummy.mp4"
 Set Theme { "background": "#191724", "foreground": "#e0def4", "black": "#26233a", "red": "#eb6f92", "green": "#31748f", "yellow": "#f6c177", "blue": "#9ccfd8", "magenta": "#c4a7e7", "cyan": "#ebbcba", "white": "#e0def4", "brightBlack": "#6e6a86", "brightRed": "#eb6f92", "brightGreen": "#31748f", "brightYellow": "#f6c177", "brightBlue": "#9ccfd8", "brightMagenta": "#c4a7e7", "brightCyan": "#ebbcba", "brightWhite": "#e0def4", "cursor": "#e0def4", "selection": "#403d52" }
-Set FontSize 14
-Set Width 1360
-Set Height 800
+Set FontSize 26
+Set Width 1040
+Set Height 820
 Set Padding 0
 Set TypingSpeed 25ms
 Set Shell "bash"

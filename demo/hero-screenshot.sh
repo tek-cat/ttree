@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Capture the README hero screenshot -> docs/screenshot.png (via VHS).
 #
-# The shot: ttree focused on a 3-pane session (vim on src/main.rs, an
-# interactive git log on the right, a debug pane lower-left), with background
-# sessions (vps/watch/web) in the sidebar tree.
+# The shot: ttree focused on a 2-pane session (vim on src/main.rs above an
+# interactive git log), with background sessions (vps/watch/web) in the sidebar
+# tree. Fewer panes + a larger font so the terminal text stays legible (at least
+# as big as the tagline) once the image is scaled down on the landing page.
 #
 # Everything runs against a THROWAWAY tmux server so your real sessions are
 # never touched. Safety invariants:
@@ -31,7 +32,7 @@ export PATH="$TMUX_TMPDIR/bin:$REPO/target/release:$PATH"
 # first load, matching a fresh-config look). Lives in the throwaway config only.
 cat > "$XDG_CONFIG_HOME/ttree/state.toml" <<'CFG'
 expanded_ids = []
-sidebar_cols = 29
+sidebar_cols = 24
 
 [focus]
 panel = "Tree"
@@ -39,16 +40,6 @@ nav_mode = "Window"
 scroll_offset = 0
 enable_scrolling = false
 CFG
-
-# Lower-left "debug" pane content.
-cat > "$TMUX_TMPDIR/bin/ttree-debug" <<'DBG'
-#!/usr/bin/env bash
-tmux list-sessions -F '  #{session_name} (#{session_windows}w)'
-echo '  --- focused window ---'
-tmux list-panes -t ttree -F '  ttree.#{pane_index} -> #{pane_current_command}'
-echo '[debug] tmux sync 4ms · interval 200ms · preview %0'
-DBG
-chmod +x "$TMUX_TMPDIR/bin/ttree-debug"
 
 guarded_cleanup(){
   local sp; sp="$(tmux display-message -p '#{socket_path}' 2>/dev/null || true)"
@@ -72,24 +63,27 @@ case "$SP" in
      tmux kill-session -t "$PROBE" 2>/dev/null || true; trap - EXIT; rm -rf "$TMUX_TMPDIR"; exit 3 ;;
 esac
 tmux kill-session -t "$PROBE"
+# Killing the server's only session shuts it down; wait for that before the next
+# new-session, which would otherwise race the dying server ("server exited
+# unexpectedly").
+sleep 0.3
 
 echo "==> Creating demo sessions in $TMUX_TMPDIR ..."
-# Focused session: ttree, one window, 3 panes (vim left, git log right @45%, debug lower-left).
+# Focused session: ttree, one window, 2 panes stacked vertically (vim on
+# src/main.rs above an interactive git log). Stacking keeps each pane full width,
+# so both stay legible at the larger font.
 GITLOG="git -c color.ui=always log --graph --oneline --decorate --all | less -R"
-tmux new-session -d -s ttree -x 250 -y 62 'bash --norc --noprofile'
+tmux new-session -d -s ttree -x 120 -y 40 'bash --norc --noprofile'
 VIM_PANE="$(tmux display-message -t ttree -p '#{pane_id}')"
 tmux send-keys -t "$VIM_PANE" "cd '$REPO' && clear && vim src/main.rs" Enter; sleep 0.8
-GIT_PANE="$(tmux split-window -h -t ttree -l 45% -P -F '#{pane_id}' 'bash --norc --noprofile')"
+GIT_PANE="$(tmux split-window -v -t "$VIM_PANE" -l 40% -P -F '#{pane_id}' 'bash --norc --noprofile')"
 tmux send-keys -t "$GIT_PANE" "cd '$REPO' && clear && $GITLOG" Enter; sleep 0.5
-DBG_PANE="$(tmux split-window -v -t "$VIM_PANE" -l 34% -P -F '#{pane_id}' 'bash --norc --noprofile')"
 
 # Background sessions, so the tree has siblings.
 tmux new-session -d -s vps   -x 200 -y 50 'bash --norc --noprofile'; tmux send-keys -t vps 'htop' Enter
 tmux new-window  -t vps 'bash --norc --noprofile';                   tmux send-keys -t vps 'journalctl -f' Enter
 tmux new-session -d -s watch -x 200 -y 50 'bash --norc --noprofile'; tmux send-keys -t watch 'cargo watch -x build' Enter
 tmux new-session -d -s web   -x 200 -y 50 'bash --norc --noprofile'; tmux send-keys -t web 'python3 -m http.server 8088' Enter
-sleep 0.3
-tmux send-keys -t "$DBG_PANE" 'clear && ttree-debug' Enter
 sleep 0.3
 tmux select-pane -t "$VIM_PANE"
 
