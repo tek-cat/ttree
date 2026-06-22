@@ -46,11 +46,11 @@ ttree is meant to be driven from a phone, so it runs natively on Android under T
 
 Three ways to get the binary onto the phone:
 
-- **Release or CI artifact (no toolchain needed).** Tagged releases attach a prebuilt Android binary on the [Releases page](https://gitlab.com/tek.cat/ttree/-/releases). To instead track the tip of `main`, every push cross-builds one; pull it from the phone with:
+- **Prebuilt release binary (no toolchain needed).** Every tagged release attaches a stripped Android binary on the [Releases page](https://gitlab.com/tek.cat/ttree/-/releases). Pull the latest straight to the phone:
 
   ```sh
   curl -sSLo "$PREFIX/bin/ttree" \
-    "https://gitlab.com/tek.cat/ttree/-/jobs/artifacts/main/raw/target/aarch64-linux-android/release/ttree?job=build:android"
+    "https://gitlab.com/tek.cat/ttree/-/releases/permalink/latest/downloads/ttree-aarch64-linux-android"
   chmod +x "$PREFIX/bin/ttree"
   ```
 

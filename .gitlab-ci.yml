@@ -2,7 +2,12 @@
 #   - pages           : existing static-site deploy (unchanged)
 #   - build:linux     : native x86_64-unknown-linux-gnu (glibc) release binary
 #   - build:android   : aarch64-linux-android (Bionic PIE) release binary for Termux
-#   - release         : on a version tag, publishes both binaries as GitLab Release assets
+#   - release         : on a version tag, publishes both binaries as a GitLab Release
+#
+# On a tag, each build job uploads its binary to the project's generic package
+# registry (permanent, and anonymously downloadable since the project is public),
+# and the release links point there. Job artifacts are members-only and expire,
+# so they are kept only as a CI convenience, not as the release download source.
 #
 # Cut a release by pushing a tag, e.g.:  git tag v0.1.1 && git push origin v0.1.1
 # Android build rationale + dead-ends: docs/android-termux-build.md
@@ -25,14 +30,19 @@ build:linux:
   script:
     - cargo build --release
     - strip target/release/ttree
-    - echo "LINUX_JOB_ID=$CI_JOB_ID" >> release.env
+    - |
+      if [ -n "$CI_COMMIT_TAG" ]; then
+        echo "Uploading ttree-x86_64-linux-gnu to the package registry for $CI_COMMIT_TAG"
+        curl --fail --silent --show-error \
+          --header "JOB-TOKEN: $CI_JOB_TOKEN" \
+          --upload-file target/release/ttree \
+          "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/ttree/${CI_COMMIT_TAG}/ttree-x86_64-linux-gnu"
+      fi
   artifacts:
     name: "ttree-x86_64-linux-gnu"
     paths:
       - target/release/ttree
     expire_in: 30 days
-    reports:
-      dotenv: release.env
 
 build:android:
   stage: build
@@ -62,14 +72,19 @@ build:android:
     - export ANDROID_NDK_HOME="$PWD/android-ndk-${NDK_VERSION}"
   script:
     - scripts/build-android.sh
-    - echo "ANDROID_JOB_ID=$CI_JOB_ID" >> release.env
+    - |
+      if [ -n "$CI_COMMIT_TAG" ]; then
+        echo "Uploading ttree-aarch64-linux-android to the package registry for $CI_COMMIT_TAG"
+        curl --fail --silent --show-error \
+          --header "JOB-TOKEN: $CI_JOB_TOKEN" \
+          --upload-file target/aarch64-linux-android/release/ttree \
+          "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/ttree/${CI_COMMIT_TAG}/ttree-aarch64-linux-android"
+      fi
   artifacts:
     name: "ttree-aarch64-linux-android"
     paths:
       - target/aarch64-linux-android/release/ttree
     expire_in: 30 days
-    reports:
-      dotenv: release.env
 
 release:
   stage: deploy
@@ -78,11 +93,11 @@ release:
     - if: '$CI_COMMIT_TAG'
   needs:
     - job: build:linux
-      artifacts: true
+      artifacts: false
     - job: build:android
-      artifacts: true
+      artifacts: false
   script:
-    - echo "Publishing release $CI_COMMIT_TAG (linux job $LINUX_JOB_ID, android job $ANDROID_JOB_ID)"
+    - echo "Publishing release $CI_COMMIT_TAG"
   release:
     tag_name: '$CI_COMMIT_TAG'
     name: 'ttree $CI_COMMIT_TAG'
@@ -90,10 +105,10 @@ release:
     assets:
       links:
         - name: 'ttree-x86_64-linux-gnu (glibc)'
-          url: '$CI_PROJECT_URL/-/jobs/$LINUX_JOB_ID/artifacts/raw/target/release/ttree'
+          url: '${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/ttree/${CI_COMMIT_TAG}/ttree-x86_64-linux-gnu'
           filepath: '/ttree-x86_64-linux-gnu'
           link_type: 'package'
         - name: 'ttree-aarch64-linux-android (Termux)'
-          url: '$CI_PROJECT_URL/-/jobs/$ANDROID_JOB_ID/artifacts/raw/target/aarch64-linux-android/release/ttree'
+          url: '${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/ttree/${CI_COMMIT_TAG}/ttree-aarch64-linux-android'
           filepath: '/ttree-aarch64-linux-android'
           link_type: 'package'
