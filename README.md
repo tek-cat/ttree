@@ -98,3 +98,7 @@ In preview mode, `Ctrl+B` acts as the tmux prefix (e.g. `Ctrl+B d` to detach and
 ## Background
 
 ttree began as a Rust rewrite of an earlier personal Python/[Textual](https://textual.textualize.io) prototype for the same workflow. This repository contains the Rust tool only.
+
+## License
+
+MIT. See [LICENSE](LICENSE).

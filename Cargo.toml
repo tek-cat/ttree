@@ -2,6 +2,7 @@
 name = "ttree"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
 
 [dependencies]
 ratatui        = "0.30.0"
