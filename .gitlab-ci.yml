@@ -1,26 +1,69 @@
-# CI overview (stages run in this order; a stage only starts if the previous passed)
-#   test    - test:cargo      : cargo test (compiles + runs the unit tests); gates everything
-#   build   - build:linux     : native x86_64-unknown-linux-gnu (glibc) release binary
-#           - build:android   : aarch64-linux-android (Bionic PIE) release binary for Termux
-#   deploy  - pages           : publish the static landing site (main only)
-#           - release         : on a version tag, publish both binaries as a GitLab Release
+# CI overview (stages run in order; a stage only starts if the previous passed)
+#   test    - test:fmt    : cargo fmt --check (formatting gate)
+#           - test:clippy : cargo clippy -D warnings (lint gate)
+#           - test:cargo  : cargo test (compiles + runs the unit tests)
+#   build   - build:linux   : native x86_64-unknown-linux-gnu (glibc) release binary
+#           - build:android : aarch64-linux-android (Bionic PIE) release binary for Termux
+#   deploy  - pages          : publish the static landing site (main only)
+#           - release        : on a version tag, publish both binaries as a GitLab Release
+#
+# The android build needs no special dependency handling: portable-pty 0.9 uses
+# serial2, which compiles for aarch64-linux-android out of the box (see
+# docs/android-termux-build.md). It only needs the NDK linker, which
+# scripts/build-android.sh wires up.
 #
 # On a tag, each build job uploads its binary to the project's generic package
-# registry (permanent, and anonymously downloadable since the project is public),
-# and the release links point there. Job artifacts are members-only and expire,
-# so they are kept only as a CI convenience, not as the release download source.
+# registry (permanent, anonymously downloadable for this public project), and the
+# release links point there.
 #
 # Cut a release by pushing a tag, e.g.:  git tag v0.1.1 && git push origin v0.1.1
-# Android build rationale + dead-ends: docs/android-termux-build.md
 
 stages:
   - test
   - build
   - deploy
 
+# Keep cargo's download caches inside the project dir so GitLab can cache them,
+# and share them across every rust job keyed on Cargo.lock (so crates are not
+# re-downloaded each run). This caches downloaded sources, not compiled output.
+variables:
+  CARGO_HOME: "$CI_PROJECT_DIR/.cargo"
+
+.cargo_cache: &cargo_cache
+  key:
+    files:
+      - Cargo.lock
+    prefix: cargo
+  paths:
+    - .cargo/registry/index/
+    - .cargo/registry/cache/
+    - .cargo/git/db/
+
+test:fmt:
+  stage: test
+  image: rust:1.94
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+    - if: '$CI_COMMIT_TAG'
+  script:
+    - rustup component add rustfmt
+    - cargo fmt --check
+
+test:clippy:
+  stage: test
+  image: rust:1.94
+  cache: *cargo_cache
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+    - if: '$CI_COMMIT_TAG'
+  script:
+    - rustup component add clippy
+    - cargo clippy --all-targets --locked -- -D warnings
+
 test:cargo:
   stage: test
   image: rust:1.94
+  cache: *cargo_cache
   rules:
     - if: '$CI_COMMIT_BRANCH == "main"'
     - if: '$CI_COMMIT_TAG'
@@ -30,11 +73,12 @@ test:cargo:
 build:linux:
   stage: build
   image: rust:1.94
+  cache: *cargo_cache
   rules:
     - if: '$CI_COMMIT_BRANCH == "main"'
     - if: '$CI_COMMIT_TAG'
   script:
-    - cargo build --release
+    - cargo build --release --locked
     - strip target/release/ttree
     - |
       if [ -n "$CI_COMMIT_TAG" ]; then
@@ -58,13 +102,19 @@ build:android:
   rules:
     - if: '$CI_COMMIT_BRANCH == "main"'
     - if: '$CI_COMMIT_TAG'
-  # Cache the ~700 MB NDK zip across pipelines, keyed on version, so we only hit
-  # dl.google.com on a cache miss (or when NDK_VERSION changes). Caching the zip
-  # rather than the unpacked tree keeps the cache small; re-extracting is cheap.
+  # Two caches: the ~700 MB NDK zip (keyed on version) and the shared cargo cache.
   cache:
-    key: "ndk-$NDK_VERSION"
-    paths:
-      - ndk.zip
+    - key: "ndk-$NDK_VERSION"
+      paths:
+        - ndk.zip
+    - key:
+        files:
+          - Cargo.lock
+        prefix: cargo
+      paths:
+        - .cargo/registry/index/
+        - .cargo/registry/cache/
+        - .cargo/git/db/
   before_script:
     - apt-get update && apt-get install -y --no-install-recommends unzip curl file
     - |
