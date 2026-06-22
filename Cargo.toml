@@ -17,3 +17,12 @@ directories    = "5"
 tui-term       = "0.3.4"
 vt100          = "0.16.2"
 portable-pty   = "0.8.1"
+
+# Android/Termux cross-build only. portable-pty -> serial -> serial-unix -> termios 0.2.2,
+# and termios 0.2.2 has no `target_os = "android"` arm, so it fails to compile for
+# aarch64-linux-android. This vendored copy adds one (mapping android -> the linux module).
+# ttree never uses portable-pty's serial path, so the linux-shaped layout is dead code and
+# the shim has no runtime effect. No impact on native Linux/macOS builds.
+# See docs/android-termux-build.md.
+[patch.crates-io]
+termios = { path = "third_party/termios" }

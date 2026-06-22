@@ -1,0 +1,16 @@
+# Vendored fork of `termios` 0.2.2 carrying an android shim for ttree's
+# aarch64-linux-android cross-build. See NOTICE and ../../docs/android-termux-build.md.
+[package]
+name = "termios"
+version = "0.2.2"
+authors = ["David Cuddeback <david.cuddeback@gmail.com>"]
+description = "Safe bindings for the termios library."
+license = "MIT"
+homepage = "https://github.com/dcuddeback/termios-rs"
+repository = "https://github.com/dcuddeback/termios-rs"
+documentation = "http://dcuddeback.github.io/termios-rs/termios/"
+readme = "README.md"
+keywords = ["termios", "tty", "terminal", "posix"]
+
+[dependencies]
+libc = "0.2"
