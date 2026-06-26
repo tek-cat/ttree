@@ -1,9 +1,9 @@
 use anyhow::Result;
 use crossterm::{
     event::{
-        self, DisableFocusChange, DisableMouseCapture, EnableMouseCapture, Event, KeyCode,
-        KeyModifiers, KeyboardEnhancementFlags, MouseButton, MouseEventKind,
-        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+        self, DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
+        EnableMouseCapture, Event, KeyCode, KeyModifiers, KeyboardEnhancementFlags, MouseButton,
+        MouseEventKind, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
@@ -32,8 +32,13 @@ fn setup_panic_hook() {
             stdout,
             PopKeyboardEnhancementFlags,
             LeaveAlternateScreen,
-            DisableMouseCapture
+            DisableMouseCapture,
+            DisableBracketedPaste
         );
+        // Don't leave a previewed session's window-size pinned if we crash.
+        if let Some((session, prior)) = FORCED_WINDOW_SIZE.lock().ok().and_then(|mut g| g.take()) {
+            restore_window_size_blocking(&session, &prior);
+        }
         default_hook(panic_info);
     }));
 }
@@ -324,17 +329,21 @@ fn encode_mouse(
 /// and those `\e[<…M` reports leak into the prompt as literal text.
 fn should_forward_mouse(kind: &MouseEventKind, mode: vt100::MouseProtocolMode) -> bool {
     use vt100::MouseProtocolMode as M;
+    // We never forward bare hover motion. ttree uses hover for its own UI, and
+    // when the previewed session runs tmux with `mouse on` the embedded layer
+    // advertises AnyMotion regardless of what the focused app wants, so trusting
+    // the mode alone streams hover reports that the app then leaks as literal
+    // `\e[<35;…M` text into the prompt.
+    if matches!(kind, MouseEventKind::Moved) {
+        return false;
+    }
     match mode {
         // App wants no mouse input at all.
         M::None => false,
         // Button press/release (and wheel), but never motion.
-        M::Press | M::PressRelease => {
-            !matches!(kind, MouseEventKind::Moved | MouseEventKind::Drag(_))
-        }
-        // Also motion while a button is held, but not bare hover motion.
-        M::ButtonMotion => !matches!(kind, MouseEventKind::Moved),
-        // Everything, including hover motion.
-        M::AnyMotion => true,
+        M::Press | M::PressRelease => !matches!(kind, MouseEventKind::Drag(_)),
+        // Also motion while a button is held (drag), plus buttons and wheel.
+        M::ButtonMotion | M::AnyMotion => true,
     }
 }
 
@@ -438,11 +447,13 @@ fn encode_key(key: &crossterm::event::KeyEvent, bytes: &mut Vec<u8>) {
         KeyCode::Enter => {
             if mods.is_empty() {
                 bytes.push(b'\r');
-            } else if mods == KeyModifiers::ALT {
-                bytes.push(0x1b);
-                bytes.push(b'\r');
             } else {
-                bytes.extend_from_slice(format!("\x1b[13;{}u", m).as_bytes());
+                // Any modifier + Enter inserts a newline instead of submitting.
+                // \n (Ctrl+J, 0x0A) is the one newline byte Claude Code accepts in
+                // every terminal and tmux config; the kitty CSI-u form (\x1b[13;2u)
+                // is silently dropped by tmux when extended-keys is off, so
+                // Shift+Enter would otherwise reach Claude as a plain submit.
+                bytes.push(b'\n');
             }
         }
         KeyCode::Esc => {
@@ -543,6 +554,105 @@ fn encode_key(key: &crossterm::event::KeyEvent, bytes: &mut Vec<u8>) {
     }
 }
 
+/// While a session is being previewed we pin its tmux `window-size` to
+/// `smallest` so the shared window can't grow past our preview pane and clip the
+/// bottom (e.g. an app's input bar). We remember the session's prior setting so
+/// we can put it back, and keep it in a static so the panic hook can restore it
+/// even if we crash mid-preview. Tuple is (session_id, prior); an empty prior
+/// means the option was inherited and should be unset on restore.
+static FORCED_WINDOW_SIZE: std::sync::Mutex<Option<(String, String)>> = std::sync::Mutex::new(None);
+
+/// Synchronous restore for the panic hook.
+fn restore_window_size_blocking(session: &str, prior: &str) {
+    let mut cmd = std::process::Command::new("tmux");
+    if prior.is_empty() {
+        cmd.args(["set-option", "-u", "-t", session, "window-size"]);
+    } else {
+        cmd.args(["set-option", "-t", session, "window-size", prior]);
+    }
+    let _ = cmd.output();
+}
+
+/// Map a selection id ($session / @window / %pane) to its session id.
+fn session_id_of(state: &AppState, id: &str) -> Option<String> {
+    if id.starts_with('$') {
+        return Some(id.to_string());
+    }
+    if let Some(w) = state.windows.get(id) {
+        return Some(w.session_id.clone());
+    }
+    if let Some(p) = state.panes.get(id) {
+        if let Some(w) = state.windows.get(&p.window_id) {
+            return Some(w.session_id.clone());
+        }
+    }
+    None
+}
+
+/// Pin a session's window-size to `smallest`, saving the prior session-scoped
+/// value (empty = inherited) so it can be restored.
+async fn force_window_size_smallest(session: &str) {
+    let prior = tokio::process::Command::new("tmux")
+        .args(["show-options", "-t", session, "window-size"])
+        .output()
+        .await
+        .ok()
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout).split_whitespace().nth(1).unwrap_or("").to_string()
+        })
+        .unwrap_or_default();
+    if let Ok(mut guard) = FORCED_WINDOW_SIZE.lock() {
+        *guard = Some((session.to_string(), prior));
+    }
+    let _ = tokio::process::Command::new("tmux")
+        .args(["set-option", "-t", session, "window-size", "smallest"])
+        .output()
+        .await;
+}
+
+/// Restore (and clear) whatever session we last pinned, if any.
+async fn restore_forced_window_size() {
+    let taken = FORCED_WINDOW_SIZE.lock().ok().and_then(|mut g| g.take());
+    if let Some((session, prior)) = taken {
+        if prior.is_empty() {
+            let _ = tokio::process::Command::new("tmux")
+                .args(["set-option", "-u", "-t", &session, "window-size"])
+                .output()
+                .await;
+        } else {
+            let _ = tokio::process::Command::new("tmux")
+                .args(["set-option", "-t", &session, "window-size", &prior])
+                .output()
+                .await;
+        }
+    }
+}
+
+/// Force a full redraw of our embedded preview client (found by its child pid).
+/// tmux's incremental repaint can leave stale cells (old scrollback, a curses
+/// dialog, fragments from a size change) in our vt100 mirror; a forced refresh
+/// repaints the whole screen and clears them.
+async fn refresh_embedded_client(pid: u32) {
+    if let Ok(output) = tokio::process::Command::new("tmux")
+        .args(["list-clients", "-F", "#{client_pid} #{client_tty}"])
+        .output()
+        .await
+    {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let pid_s = pid.to_string();
+        for line in stdout.lines() {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() == 2 && parts[0] == pid_s {
+                let _ = tokio::process::Command::new("tmux")
+                    .args(["refresh-client", "-t", parts[1]])
+                    .output()
+                    .await;
+                break;
+            }
+        }
+    }
+}
+
 async fn run_app(state: &mut AppState) -> Result<()> {
     let last_error: Option<String> = None;
     let mut active_terminal: Option<EmbeddedTerminal> = None;
@@ -551,7 +661,7 @@ async fn run_app(state: &mut AppState) -> Result<()> {
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture, EnableBracketedPaste)?;
     // We never use focus reporting, but something upstream (the terminal itself,
     // mosh, or an outer tmux) may leave mode 1004 enabled. Those `\e[I`/`\e[O`
     // sequences are useless to us and actively harmful: over a laggy link
@@ -587,6 +697,12 @@ async fn run_app(state: &mut AppState) -> Result<()> {
     let mut last_sidebar_cols: u16 = 0;
     let mut dragging_separator = false;
     let mut prefix_pending = false;
+    // The session whose tmux window-size we've currently pinned to `smallest`
+    // (only while actively previewing). None when not pinning.
+    let mut forced_session: Option<String> = None;
+    // Last time we forced a full repaint of the embedded mirror, to self-heal
+    // stale/frozen frames.
+    let mut last_mirror_refresh = tokio::time::Instant::now();
     let mut current_switch_task: Option<tokio::task::JoinHandle<()>> = None;
     // We defer the host-terminal's left-Down in the preview so we can decide
     // (on the next event) whether the user is dragging-to-select (we keep it)
@@ -598,53 +714,92 @@ async fn run_app(state: &mut AppState) -> Result<()> {
             let _ = sync_state(state).await;
             last_sync_update = tokio::time::Instant::now();
 
-            // In preview mode, sync tree selection to whichever session the embedded client is on
-            if state.focus.panel == Panel::Preview {
-                if let Some(term) = &active_terminal {
-                    if let Some(pid) = term.pty_pid {
-                        if let Ok(output) = tokio::process::Command::new("tmux")
-                            .args(["list-clients", "-F", "#{client_pid} #{session_id} #{pane_id}"])
-                            .output()
-                            .await
-                        {
-                            let stdout = String::from_utf8_lossy(&output.stdout);
-                            for line in stdout.lines() {
-                                let parts: Vec<&str> = line.split_whitespace().collect();
-                                if parts.len() == 3 && parts[0] == pid.to_string() {
-                                    let current_session = parts[1].to_string();
-                                    let current_pane = parts[2].to_string();
-                                    let visible = state.get_dynamic_visible_items();
-                                    // Prefer exact pane match; fall back to first item in session
-                                    let target = if visible.contains(&current_pane) {
-                                        Some(current_pane)
-                                    } else {
-                                        visible.into_iter().find(|id| {
-                                            if id == &current_session {
-                                                return true;
-                                            }
-                                            if let Some(w) = state.windows.get(id) {
-                                                return w.session_id == current_session;
-                                            }
-                                            if let Some(p) = state.panes.get(id) {
-                                                return state
-                                                    .windows
-                                                    .get(&p.window_id)
-                                                    .map(|w| w.session_id == current_session)
-                                                    .unwrap_or(false);
-                                            }
-                                            false
-                                        })
-                                    };
-                                    if let Some(id) = target {
-                                        if state.focus.selected_id.as_deref() != Some(&id) {
-                                            state.focus.selected_id = Some(id);
-                                        }
-                                    }
-                                    break;
-                                }
-                            }
+            // Keep the embedded mirror in sync with the selection and repainting.
+            // The one-shot switch on selection-change can be aborted mid-navigation,
+            // stranding the client on the wrong session showing a stale frame; an
+            // attached client can also stop repainting until something nudges it.
+            // So here we (a) follow the client's session into the tree while
+            // previewing, (b) re-assert the switch in tree mode if the client
+            // drifted off the selected session, and (c) periodically force a full
+            // repaint so a stale frame self-heals instead of lingering.
+            if let Some(pid) = active_terminal.as_ref().and_then(|t| t.pty_pid) {
+                let mut found = false;
+                let mut client_session = String::new();
+                let mut client_pane = String::new();
+                let mut client_tty = String::new();
+                if let Ok(output) = tokio::process::Command::new("tmux")
+                    .args([
+                        "list-clients",
+                        "-F",
+                        "#{client_pid} #{session_id} #{pane_id} #{client_tty}",
+                    ])
+                    .output()
+                    .await
+                {
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    let pid_s = pid.to_string();
+                    for line in stdout.lines() {
+                        let parts: Vec<&str> = line.split_whitespace().collect();
+                        if parts.len() == 4 && parts[0] == pid_s {
+                            found = true;
+                            client_session = parts[1].to_string();
+                            client_pane = parts[2].to_string();
+                            client_tty = parts[3].to_string();
+                            break;
                         }
                     }
+                }
+
+                if found && state.focus.panel == Panel::Preview {
+                    // Follow whichever session the embedded client is on.
+                    let visible = state.get_dynamic_visible_items();
+                    let target = if visible.contains(&client_pane) {
+                        Some(client_pane.clone())
+                    } else {
+                        visible.into_iter().find(|id| {
+                            if id == &client_session {
+                                return true;
+                            }
+                            if let Some(w) = state.windows.get(id) {
+                                return w.session_id == client_session;
+                            }
+                            if let Some(p) = state.panes.get(id) {
+                                return state
+                                    .windows
+                                    .get(&p.window_id)
+                                    .map(|w| w.session_id == client_session)
+                                    .unwrap_or(false);
+                            }
+                            false
+                        })
+                    };
+                    if let Some(id) = target {
+                        if state.focus.selected_id.as_deref() != Some(&id) {
+                            state.focus.selected_id = Some(id);
+                        }
+                    }
+                } else if found {
+                    // Tree mode: if the client drifted off the selected session,
+                    // clear the last-selected marker so the switch logic re-runs.
+                    let want =
+                        state.focus.selected_id.as_deref().and_then(|id| session_id_of(state, id));
+                    if let Some(want) = want {
+                        if want != client_session {
+                            last_selected_id = None;
+                        }
+                    }
+                }
+
+                if found
+                    && !client_tty.is_empty()
+                    && tokio::time::Instant::now()
+                        > last_mirror_refresh + Duration::from_millis(1000)
+                {
+                    let _ = tokio::process::Command::new("tmux")
+                        .args(["refresh-client", "-t", &client_tty])
+                        .output()
+                        .await;
+                    last_mirror_refresh = tokio::time::Instant::now();
                 }
             }
         }
@@ -709,6 +864,13 @@ async fn run_app(state: &mut AppState) -> Result<()> {
                                     let mut cmd = tokio::process::Command::new("tmux");
                                     cmd.args(["switch-client", "-c", &tty, "-t", &target_id_clone]);
                                     let _ = cmd.output().await;
+                                    // Force a clean repaint of the new session so
+                                    // stale cells from the previous one don't
+                                    // bleed into our mirror.
+                                    let _ = tokio::process::Command::new("tmux")
+                                        .args(["refresh-client", "-t", &tty])
+                                        .output()
+                                        .await;
                                 }
                             }
                         }));
@@ -751,6 +913,15 @@ async fn run_app(state: &mut AppState) -> Result<()> {
                                 pty_pid: pid,
                                 pty_master: std::sync::Arc::new(std::sync::Mutex::new(pair.master)),
                             });
+                            // Once the client has registered with the server,
+                            // force a full repaint so leftover scrollback under
+                            // the freshly-attached session doesn't bleed through.
+                            if let Some(p) = pid {
+                                tokio::spawn(async move {
+                                    tokio::time::sleep(Duration::from_millis(200)).await;
+                                    refresh_embedded_client(p).await;
+                                });
+                            }
                             let mut receiver = rx;
                             let parser_clone = parser.clone();
 
@@ -763,7 +934,23 @@ async fn run_app(state: &mut AppState) -> Result<()> {
                                                 p.process(&buf[..n]);
                                             }
                                         }
-                                        _ => break,
+                                        // EOF: the embedded client exited for good.
+                                        Ok(_) => break,
+                                        // Transient interruptions must not kill the
+                                        // reader: if it dies, the PTY stops being
+                                        // drained, tmux suspends the client and the
+                                        // mirror freezes. Retry those; only bail on
+                                        // a genuine, persistent error.
+                                        Err(e)
+                                            if matches!(
+                                                e.kind(),
+                                                std::io::ErrorKind::Interrupted
+                                                    | std::io::ErrorKind::WouldBlock
+                                            ) =>
+                                        {
+                                            continue;
+                                        }
+                                        Err(_) => break,
                                     }
                                 }
                             });
@@ -796,6 +983,30 @@ async fn run_app(state: &mut AppState) -> Result<()> {
             active_terminal = None;
             // Switch back to Tree panel if the terminal exits
             state.focus.panel = Panel::Tree;
+        }
+
+        // Pin the previewed session's window-size while actually previewing, so
+        // the shared tmux window can't outgrow our pane and clip the input bar.
+        // Scoped to the Preview panel only: doing it for the always-on tree
+        // mirror would resize co-attached sessions as the user merely browses.
+        let desired_forced = if state.focus.panel == Panel::Preview {
+            state.focus.selected_id.as_deref().and_then(|id| session_id_of(state, id))
+        } else {
+            None
+        };
+        if desired_forced != forced_session {
+            if forced_session.is_some() {
+                restore_forced_window_size().await;
+            }
+            if let Some(sess) = &desired_forced {
+                force_window_size_smallest(sess).await;
+                if let Some(term) = &active_terminal {
+                    if let Some(pid) = term.pty_pid {
+                        refresh_embedded_client(pid).await;
+                    }
+                }
+            }
+            forced_session = desired_forced;
         }
 
         terminal.draw(|f| {
@@ -967,6 +1178,28 @@ async fn run_app(state: &mut AppState) -> Result<()> {
                 continue;
             }
 
+            if let Event::Paste(text) = ev {
+                // Forward pastes to the embedded preview as one block. Claude Code
+                // mishandles real bracketed paste (the \x1b[201~ marker leaks into
+                // the prompt and can hang the CLI), so we don't wrap it; instead we
+                // translate newlines to \n (Ctrl+J), which Claude inserts as
+                // newlines rather than submitting each line as its own prompt.
+                if state.focus.panel == Panel::Preview {
+                    if let Some(term) = &active_terminal {
+                        let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+                        let _ = term.pty_writer.send(normalized.into_bytes());
+                    }
+                } else if let crate::state::InputMode::Renaming { input, .. }
+                | crate::state::InputMode::NewSession { input } = &mut state.input_mode
+                {
+                    // ttree's own single-line fields: keep the text, drop breaks.
+                    let cleaned: String =
+                        text.chars().filter(|c| *c != '\n' && *c != '\r').collect();
+                    input.push_str(&cleaned);
+                }
+                continue;
+            }
+
             if let Event::Key(key) = ev {
                 // Any keystroke ends the lifetime of a finalised preview
                 // selection — the user has clearly moved on.
@@ -1080,7 +1313,8 @@ async fn run_app(state: &mut AppState) -> Result<()> {
                                 io::stdout(),
                                 PopKeyboardEnhancementFlags,
                                 LeaveAlternateScreen,
-                                DisableMouseCapture
+                                DisableMouseCapture,
+                                DisableBracketedPaste
                             )?;
                             std::process::exit(0);
                         }
@@ -1091,7 +1325,8 @@ async fn run_app(state: &mut AppState) -> Result<()> {
                                 io::stdout(),
                                 PopKeyboardEnhancementFlags,
                                 LeaveAlternateScreen,
-                                DisableMouseCapture
+                                DisableMouseCapture,
+                                DisableBracketedPaste
                             )?;
                             std::process::exit(0);
                         }
@@ -1190,6 +1425,9 @@ async fn run_app(state: &mut AppState) -> Result<()> {
         }
     }
 
+    // Put back any window-size we pinned for previewing.
+    restore_forced_window_size().await;
+
     if let Some(term) = active_terminal.take() {
         if let Some(pid) = term.pty_pid {
             let _ = tokio::process::Command::new("kill").arg(pid.to_string()).output().await;
@@ -1205,7 +1443,8 @@ async fn run_app(state: &mut AppState) -> Result<()> {
         terminal.backend_mut(),
         PopKeyboardEnhancementFlags,
         LeaveAlternateScreen,
-        DisableMouseCapture
+        DisableMouseCapture,
+        DisableBracketedPaste
     )?;
     terminal.show_cursor()?;
 
