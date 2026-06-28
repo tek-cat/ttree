@@ -17,6 +17,7 @@ use std::{
 };
 
 mod state;
+mod theme;
 mod tmux_client;
 mod ui;
 
@@ -252,6 +253,7 @@ async fn main() -> Result<()> {
     setup_panic_hook();
 
     let mut state = AppState::load_from_disk();
+    state.theme = theme::Theme::from_tmux().await;
     loop {
         match run_app(&mut state).await {
             Ok(()) => {
@@ -259,6 +261,7 @@ async fn main() -> Result<()> {
                 // Reload state from disk to get the latest focus/expanded state
                 state = AppState::load_from_disk();
                 state.last_target_id = last_target;
+                state.theme = theme::Theme::from_tmux().await;
             }
             Err(e) => {
                 eprintln!("Error: {}", e);

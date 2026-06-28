@@ -19,6 +19,9 @@ pub struct AppState {
     pub last_target_id: Option<String>,
     pub sidebar_cols: u16,
     pub preview_selection: Option<PreviewSelection>,
+    /// Colors adopted from the user's tmux status bar at startup. Not persisted;
+    /// re-read from the live tmux server each launch.
+    pub theme: crate::theme::Theme,
 }
 
 /// A selection inside the embedded preview's vt100 grid. Coordinates are
@@ -53,6 +56,7 @@ impl Default for AppState {
             last_target_id: None,
             sidebar_cols: 0,
             preview_selection: None,
+            theme: crate::theme::Theme::default(),
         }
     }
 }

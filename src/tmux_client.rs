@@ -31,6 +31,24 @@ impl Tmux {
         Ok(String::from_utf8_lossy(&output.stdout).lines().map(|s| s.to_string()).collect())
     }
 
+    /// Read a single global tmux option value (`show-options -gv <name>`),
+    /// falling back to window scope (`-gwv`) for options like
+    /// `window-status-current-style` that older tmux exposes only there.
+    /// Returns `None` on any failure or an empty value.
+    pub async fn show_option_global(name: &str) -> Option<String> {
+        for scope in ["-gv", "-gwv"] {
+            let output =
+                Command::new("tmux").args(["show-options", scope, name]).output().await.ok()?;
+            if output.status.success() {
+                let val = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !val.is_empty() {
+                    return Some(val);
+                }
+            }
+        }
+        None
+    }
+
     #[allow(dead_code)]
     pub async fn capture_pane(pane_id: &str) -> Result<String> {
         let output =

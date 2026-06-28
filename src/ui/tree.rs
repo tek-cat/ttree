@@ -25,8 +25,8 @@ fn pane_name(pane: &Pane) -> &str {
     }
 }
 
-fn sel_style(is_selected: bool) -> Style {
-    let bg = if is_selected { Color::DarkGray } else { Color::Reset };
+fn sel_style(is_selected: bool, selection_bg: Color) -> Style {
+    let bg = if is_selected { selection_bg } else { Color::Reset };
     let mut s = Style::default().bg(bg);
     if is_selected {
         s = s.add_modifier(Modifier::BOLD);
@@ -39,6 +39,9 @@ impl<'a> Widget for TreeWidget<'a> {
         let mut y = area.y;
         let mut line_idx: usize = 0;
         let scroll = self.state.focus.scroll_offset;
+        let icon_color = self.state.theme.icon;
+        let active_fg = self.state.theme.active;
+        let selection_bg = self.state.theme.selection_bg;
 
         for session in self.state.sessions.values() {
             if y >= area.bottom() {
@@ -75,10 +78,10 @@ impl<'a> Widget for TreeWidget<'a> {
                 let is_sel = Some(&leaf_id) == self.state.focus.selected_id.as_ref();
 
                 if line_idx >= scroll {
-                    let style = sel_style(is_sel);
-                    let fg = if is_active { Color::Cyan } else { Color::Reset };
+                    let style = sel_style(is_sel, selection_bg);
+                    let fg = if is_active { active_fg } else { Color::Reset };
                     let line = Line::from(vec![
-                        Span::styled("► ", style.fg(Color::Yellow)),
+                        Span::styled("► ", style.fg(icon_color)),
                         Span::styled(label, style.fg(fg)),
                     ]);
                     buf.set_line(area.x, y, &line, area.width);
@@ -90,11 +93,11 @@ impl<'a> Widget for TreeWidget<'a> {
                 let is_sel = Some(&session.id) == self.state.focus.selected_id.as_ref();
 
                 if line_idx >= scroll {
-                    let style = sel_style(is_sel);
+                    let style = sel_style(is_sel, selection_bg);
                     let icon = if session.expanded { "▼" } else { "▶" };
                     let attached = if session.attached { " (attached)" } else { "" };
                     let line = Line::from(vec![
-                        Span::styled(format!("{} ", icon), style.fg(Color::Yellow)),
+                        Span::styled(format!("{} ", icon), style.fg(icon_color)),
                         Span::styled(session.name.clone(), style),
                         Span::styled(
                             format!(" ({}{})", total_panes, attached),
@@ -119,8 +122,8 @@ impl<'a> Widget for TreeWidget<'a> {
                                 if line_idx >= scroll {
                                     let is_psel =
                                         Some(pid) == self.state.focus.selected_id.as_ref();
-                                    let style = sel_style(is_psel);
-                                    let fg = if pane.active { Color::Cyan } else { Color::Reset };
+                                    let style = sel_style(is_psel, selection_bg);
+                                    let fg = if pane.active { active_fg } else { Color::Reset };
                                     let connector = if idx == num_panes - 1 {
                                         "  └─ "
                                     } else {
@@ -143,11 +146,11 @@ impl<'a> Widget for TreeWidget<'a> {
                 let is_sel = Some(&session.id) == self.state.focus.selected_id.as_ref();
 
                 if line_idx >= scroll {
-                    let style = sel_style(is_sel);
+                    let style = sel_style(is_sel, selection_bg);
                     let icon = if session.expanded { "▼" } else { "▶" };
                     let attached = if session.attached { " (attached)" } else { "" };
                     let line = Line::from(vec![
-                        Span::styled(format!("{} ", icon), style.fg(Color::Yellow)),
+                        Span::styled(format!("{} ", icon), style.fg(icon_color)),
                         Span::styled(session.name.clone(), style),
                         Span::styled(
                             format!(" ({}{})", num_windows, attached),
@@ -173,16 +176,16 @@ impl<'a> Widget for TreeWidget<'a> {
                                 let is_wsel =
                                     Some(&leaf_id) == self.state.focus.selected_id.as_ref();
                                 if line_idx >= scroll {
-                                    let style = sel_style(is_wsel);
+                                    let style = sel_style(is_wsel, selection_bg);
                                     let (label, is_active) = window
                                         .panes
                                         .first()
                                         .and_then(|pid| self.state.panes.get(pid))
                                         .map(|p| (pane_name(p).to_string(), p.active))
                                         .unwrap_or_else(|| (window.name.clone(), window.active));
-                                    let fg = if is_active { Color::Cyan } else { Color::Reset };
+                                    let fg = if is_active { active_fg } else { Color::Reset };
                                     let line = Line::from(vec![
-                                        Span::styled("  ► ", style.fg(Color::Yellow)),
+                                        Span::styled("  ► ", style.fg(icon_color)),
                                         Span::styled(label, style.fg(fg)),
                                     ]);
                                     buf.set_line(area.x, y, &line, area.width);
@@ -193,14 +196,11 @@ impl<'a> Widget for TreeWidget<'a> {
                                 // Window is a header (expandable)
                                 let is_wsel = Some(wid) == self.state.focus.selected_id.as_ref();
                                 if line_idx >= scroll {
-                                    let style = sel_style(is_wsel);
-                                    let fg = if window.active { Color::Cyan } else { Color::Reset };
+                                    let style = sel_style(is_wsel, selection_bg);
+                                    let fg = if window.active { active_fg } else { Color::Reset };
                                     let wicon = if window.expanded { "▼" } else { "▶" };
                                     let line = Line::from(vec![
-                                        Span::styled(
-                                            format!("  {} ", wicon),
-                                            style.fg(Color::Yellow),
-                                        ),
+                                        Span::styled(format!("  {} ", wicon), style.fg(icon_color)),
                                         Span::styled(window.name.clone(), style.fg(fg)),
                                     ]);
                                     buf.set_line(area.x, y, &line, area.width);
@@ -217,9 +217,9 @@ impl<'a> Widget for TreeWidget<'a> {
                                             if line_idx >= scroll {
                                                 let is_psel = Some(pid)
                                                     == self.state.focus.selected_id.as_ref();
-                                                let style = sel_style(is_psel);
+                                                let style = sel_style(is_psel, selection_bg);
                                                 let fg = if pane.active {
-                                                    Color::Cyan
+                                                    active_fg
                                                 } else {
                                                     Color::Reset
                                                 };

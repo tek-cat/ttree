@@ -104,21 +104,21 @@ pub fn render(
         }
     };
 
-    // Green background for entire bar
+    // Bar background for the entire row (tmux status-style bg).
+    let theme = &state.theme;
     let bg_rect =
-        Paragraph::new("").style(Style::default().bg(Color::Green)).block(Block::default());
+        Paragraph::new("").style(Style::default().bg(theme.bar_bg)).block(Block::default());
     frame.render_widget(bg_rect, chunks[1]);
 
-    // Render mode label
-    let mode_bg = Color::Green;
-    let mode_rect = Rect::new(chunks[1].x, chunks[1].y, mode_label.len() as u16 + 1, 1);
-
-    let tree_label = Paragraph::new(mode_label)
-        .style(Style::default().bg(mode_bg).fg(Color::Black).add_modifier(Modifier::BOLD));
+    // Mode label rendered as a tmux-style pill (window-status-current-style).
+    let pill = format!(" {} ", mode_label);
+    let mode_rect = Rect::new(chunks[1].x, chunks[1].y, pill.len() as u16, 1);
+    let tree_label = Paragraph::new(pill.clone())
+        .style(Style::default().bg(theme.pill_bg).fg(theme.pill_fg).add_modifier(Modifier::BOLD));
     frame.render_widget(tree_label, mode_rect);
 
-    // Render commands starting after the mode label (offset by mode label width + 1 for space)
-    let cmd_offset = mode_label.len() as u16 + 1;
+    // Render commands starting after the pill (offset by pill width + 1 for space).
+    let cmd_offset = pill.len() as u16 + 1;
     let cmd_area = Rect::new(
         chunks[1].x + cmd_offset,
         chunks[1].y,
@@ -126,7 +126,7 @@ pub fn render(
         1,
     );
     let cmd_line = Paragraph::new(cmd_text)
-        .style(Style::default().fg(Color::Black))
+        .style(Style::default().bg(theme.bar_bg).fg(theme.bar_fg))
         .alignment(Alignment::Left);
     frame.render_widget(cmd_line, cmd_area);
 
