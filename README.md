@@ -2,6 +2,8 @@
 
 ![ttree: a Rust TUI for tmux sessions, showing the session tree and a live pane preview](docs/screenshot.png)
 
+**Homepage:** [ttree.tek.cat](https://ttree.tek.cat/)
+
 A terminal UI for tmux, written in Rust on [Ratatui](https://ratatui.rs). It renders your sessions, windows, and panes as a navigable tree, and embeds a **live preview** of any pane in the right-hand panel. The preview is the point: you can see what a pane is doing without attaching to it.
 
 Built to solve a specific problem: driving many concurrent AI agent sessions running on a laptop from a phone, over Termux and a WireGuard VPN. Switching tmux contexts by hand to check on each one is slow and easy to get wrong. ttree puts every session in one tree and shows live output inline, so a glance replaces a context switch.
