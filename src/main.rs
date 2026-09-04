@@ -40,6 +40,9 @@ fn setup_panic_hook() {
         if let Some((session, prior)) = FORCED_WINDOW_SIZE.lock().ok().and_then(|mut g| g.take()) {
             restore_window_size_blocking(&session, &prior);
         }
+        if let Some((session, prior)) = PINNED_MOUSE.lock().ok().and_then(|mut g| g.take()) {
+            restore_mouse_blocking(&session, &prior);
+        }
         default_hook(panic_info);
     }));
 }
@@ -680,6 +683,65 @@ async fn restore_forced_window_size() {
     }
 }
 
+/// The session whose tmux `mouse` option we've pinned on while mirroring it,
+/// with its prior session-scoped value (empty = inherited, so restore by
+/// unsetting). Passthrough is only worth anything if tmux is listening for the
+/// mouse: with `mouse off` a drag in the preview selects nothing at all, and
+/// since ttree holds the terminal's mouse itself, tmux copy-mode is the only
+/// selection the preview can offer. Kept in a static so the panic hook can put
+/// it back even if we crash mid-preview.
+static PINNED_MOUSE: std::sync::Mutex<Option<(String, String)>> = std::sync::Mutex::new(None);
+
+/// Synchronous restore for the panic hook.
+fn restore_mouse_blocking(session: &str, prior: &str) {
+    let mut cmd = std::process::Command::new("tmux");
+    if prior.is_empty() {
+        cmd.args(["set-option", "-u", "-t", session, "mouse"]);
+    } else {
+        cmd.args(["set-option", "-t", session, "mouse", prior]);
+    }
+    let _ = cmd.output();
+}
+
+/// Pin a session's `mouse` on, saving the prior session-scoped value
+/// (empty = inherited) so it can be restored.
+async fn pin_mouse_on(session: &str) {
+    let prior = tokio::process::Command::new("tmux")
+        .args(["show-options", "-t", session, "mouse"])
+        .output()
+        .await
+        .ok()
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout).split_whitespace().nth(1).unwrap_or("").to_string()
+        })
+        .unwrap_or_default();
+    if let Ok(mut guard) = PINNED_MOUSE.lock() {
+        *guard = Some((session.to_string(), prior));
+    }
+    let _ = tokio::process::Command::new("tmux")
+        .args(["set-option", "-t", session, "mouse", "on"])
+        .output()
+        .await;
+}
+
+/// Restore (and clear) whatever session's mouse setting we last pinned, if any.
+async fn restore_pinned_mouse() {
+    let taken = PINNED_MOUSE.lock().ok().and_then(|mut g| g.take());
+    if let Some((session, prior)) = taken {
+        if prior.is_empty() {
+            let _ = tokio::process::Command::new("tmux")
+                .args(["set-option", "-u", "-t", &session, "mouse"])
+                .output()
+                .await;
+        } else {
+            let _ = tokio::process::Command::new("tmux")
+                .args(["set-option", "-t", &session, "mouse", &prior])
+                .output()
+                .await;
+        }
+    }
+}
+
 /// Force a full redraw of our embedded preview client (found by its child pid).
 /// tmux's incremental repaint can leave stale cells (old scrollback, a curses
 /// dialog, fragments from a size change) in our vt100 mirror; a forced refresh
@@ -749,6 +811,9 @@ async fn run_app(state: &mut AppState) -> Result<()> {
     let mut last_sidebar_cols: u16 = 0;
     let mut dragging_separator = false;
     let mut prefix_pending = false;
+    // The session whose tmux `mouse` option we've currently pinned on. None when
+    // not pinning.
+    let mut pinned_mouse: Option<String> = None;
     // The session whose tmux window-size we've currently pinned to `smallest`
     // (only while actively previewing). None when not pinning.
     let mut forced_session: Option<String> = None;
@@ -1061,6 +1126,23 @@ async fn run_app(state: &mut AppState) -> Result<()> {
             forced_session = desired_forced;
         }
 
+        // Keep tmux listening for the mouse in whatever session we're mirroring,
+        // so passthrough has something to land on, and put the user's setting
+        // back when we stop. Unlike window-size this isn't scoped to the Preview
+        // panel: the preview forwards mouse under tree focus too, and a drag
+        // that silently selects nothing is the worse surprise.
+        let desired_mouse =
+            active_terminal.as_ref().and_then(|t| session_id_of(state, &t.target_id));
+        if desired_mouse != pinned_mouse {
+            if pinned_mouse.is_some() {
+                restore_pinned_mouse().await;
+            }
+            if let Some(sess) = &desired_mouse {
+                pin_mouse_on(sess).await;
+            }
+            pinned_mouse = desired_mouse;
+        }
+
         terminal.draw(|f| {
             ui::render(f, state, &active_terminal, &last_error);
         })?;
@@ -1280,6 +1362,10 @@ async fn run_app(state: &mut AppState) -> Result<()> {
                     match key.code {
                         KeyCode::Char('q') => {
                             state.save_to_disk();
+                            // This path exits the process outright, so put the
+                            // session options back before it does.
+                            restore_forced_window_size().await;
+                            restore_pinned_mouse().await;
                             disable_raw_mode()?;
                             execute!(
                                 io::stdout(),
@@ -1292,6 +1378,8 @@ async fn run_app(state: &mut AppState) -> Result<()> {
                         }
                         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             state.save_to_disk();
+                            restore_forced_window_size().await;
+                            restore_pinned_mouse().await;
                             disable_raw_mode()?;
                             execute!(
                                 io::stdout(),
@@ -1397,8 +1485,9 @@ async fn run_app(state: &mut AppState) -> Result<()> {
         }
     }
 
-    // Put back any window-size we pinned for previewing.
+    // Put back the tmux options we pinned for previewing.
     restore_forced_window_size().await;
+    restore_pinned_mouse().await;
 
     if let Some(term) = active_terminal.take() {
         if let Some(pid) = term.pty_pid {

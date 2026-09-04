@@ -166,7 +166,6 @@ pub fn render(
             "  Drag separator  resize sidebar",
             "  In preview      passed through to tmux: click a pane,",
             "                  drag to select, scroll the scrollback",
-            "                  (needs tmux `set -g mouse on`)",
             "",
             "Press any key to close...",
         ]

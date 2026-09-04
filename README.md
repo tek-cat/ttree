@@ -15,7 +15,7 @@ Built to solve a specific problem: driving many concurrent AI agent sessions run
 - Click a session in the sidebar to switch the preview, without leaving preview mode
 - Persistent UI state (selection, expanded nodes, sidebar width) across restarts, stored in `~/.config/ttree/state.toml`
 - Full mouse support: click to select, drag the separator to resize, scroll to navigate
-- Mouse in the preview is passed straight through to tmux, so clicking a pane, dragging to select and scrolling the scrollback behave exactly as they do in your own tmux (needs `set -g mouse on`)
+- Mouse in the preview is passed straight through to tmux, so clicking a pane, dragging to select and scrolling the scrollback behave exactly as they do in your own tmux. ttree turns tmux's `mouse` option on for the session it is mirroring and puts your previous setting back when it stops
 - Copies made in the preview are relayed onward as OSC 52, which works over SSH and through tmux
 - Vim-style navigation: `j` / `k` / `h` / `l`
 - Create and rename sessions without leaving the TUI
