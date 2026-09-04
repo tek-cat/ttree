@@ -326,17 +326,20 @@ fn encode_mouse(
     Some(format!("\x1b[<{};{};{}{}", button, col, row, suffix).into_bytes())
 }
 
-/// Whether a mouse event should be forwarded to the embedded preview, given the
-/// mouse tracking mode the embedded app has actually requested. Without this we
-/// stream every motion/scroll report at apps that never asked for the mouse,
-/// and those `\e[<…M` reports leak into the prompt as literal text.
+/// Whether to hand a mouse event to the embedded tmux client, given the tracking
+/// mode that client has actually requested from us. This is the only judgement
+/// ttree makes about mouse input in the preview: what the event *means* (focus a
+/// pane, start a copy-mode selection, scroll the scrollback) is tmux's call.
+/// Without the gate we'd stream every motion/scroll report at clients that never
+/// asked for the mouse, and those `\e[<…M` reports leak into the prompt as
+/// literal text.
 fn should_forward_mouse(kind: &MouseEventKind, mode: vt100::MouseProtocolMode) -> bool {
     use vt100::MouseProtocolMode as M;
-    // We never forward bare hover motion. ttree uses hover for its own UI, and
-    // when the previewed session runs tmux with `mouse on` the embedded layer
+    // We never forward bare hover motion. With `mouse on` the embedded client
     // advertises AnyMotion regardless of what the focused app wants, so trusting
-    // the mode alone streams hover reports that the app then leaks as literal
-    // `\e[<35;…M` text into the prompt.
+    // the mode alone streams hover reports that tmux passes down to an app that
+    // never asked, which then leaks them as literal `\e[<35;…M` text into the
+    // prompt. Nothing tmux does with the mouse needs buttonless motion.
     if matches!(kind, MouseEventKind::Moved) {
         return false;
     }
@@ -350,40 +353,86 @@ fn should_forward_mouse(kind: &MouseEventKind, mode: vt100::MouseProtocolMode) -
     }
 }
 
-fn base64_encode(data: &[u8]) -> String {
-    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
-    for chunk in data.chunks(3) {
-        let b0 = chunk[0] as u32;
-        let b1 = chunk.get(1).copied().unwrap_or(0) as u32;
-        let b2 = chunk.get(2).copied().unwrap_or(0) as u32;
-        let n = (b0 << 16) | (b1 << 8) | b2;
-        out.push(T[((n >> 18) & 0x3f) as usize] as char);
-        out.push(T[((n >> 12) & 0x3f) as usize] as char);
-        out.push(if chunk.len() > 1 { T[((n >> 6) & 0x3f) as usize] as char } else { '=' });
-        out.push(if chunk.len() > 2 { T[(n & 0x3f) as usize] as char } else { '=' });
-    }
-    out
+/// Relays OSC 52 clipboard writes out of the embedded tmux client and up to the
+/// host terminal. Copying in the preview is tmux's job now, and tmux sets the
+/// clipboard by emitting `\e]52;c;<base64>` *at its own client*, which is our
+/// PTY rather than the real terminal, so the copy would stop at us unless we
+/// pass it on. Sequences straddle 4 KiB read boundaries, hence the running state.
+#[derive(Default)]
+struct Osc52Relay {
+    /// How much of the `\e]52;` introducer we've matched so far.
+    prefix: usize,
+    /// Payload collected since the introducer, or None when not capturing.
+    payload: Option<Vec<u8>>,
+    /// We saw an ESC inside the payload: the next byte decides whether it's
+    /// an ST terminator (`\e\\`) or just data.
+    esc_pending: bool,
 }
 
-fn osc52_copy(text: &str) {
-    use std::io::Write;
-    let mut stdout = io::stdout();
-    let _ = write!(stdout, "\x1b]52;c;{}\x07", base64_encode(text.as_bytes()));
-    let _ = stdout.flush();
-}
+impl Osc52Relay {
+    const INTRO: &'static [u8] = b"\x1b]52;";
+    /// Beyond this a "sequence" is junk we mis-latched onto; drop it rather
+    /// than buffer the whole session's output.
+    const MAX_PAYLOAD: usize = 1 << 20;
 
-fn extract_selection_text(parser: &vt100::Parser, anchor: (u16, u16), head: (u16, u16)) -> String {
-    let (start, end) = if anchor <= head { (anchor, head) } else { (head, anchor) };
-    let (rows, cols) = parser.screen().size();
-    if start.0 >= rows {
-        return String::new();
+    fn feed(&mut self, data: &[u8]) {
+        for &b in data {
+            match &mut self.payload {
+                None => {
+                    if b == Self::INTRO[self.prefix] {
+                        self.prefix += 1;
+                        if self.prefix == Self::INTRO.len() {
+                            self.prefix = 0;
+                            self.payload = Some(Vec::new());
+                        }
+                    } else {
+                        // Restart the match, allowing for `\e\e]52;`.
+                        self.prefix = usize::from(b == Self::INTRO[0]);
+                    }
+                }
+                Some(payload) => {
+                    if self.esc_pending {
+                        self.esc_pending = false;
+                        if b == b'\\' {
+                            let done = std::mem::take(payload);
+                            self.payload = None;
+                            Self::emit(&done);
+                            continue;
+                        }
+                        payload.push(0x1b);
+                    }
+                    match b {
+                        0x07 => {
+                            let done = std::mem::take(payload);
+                            self.payload = None;
+                            Self::emit(&done);
+                        }
+                        0x1b => self.esc_pending = true,
+                        _ => {
+                            payload.push(b);
+                            if payload.len() > Self::MAX_PAYLOAD {
+                                self.payload = None;
+                                self.esc_pending = false;
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
-    let end_row = end.0.min(rows.saturating_sub(1));
-    // contents_between treats end_col as exclusive; we want to include the
-    // cell under the head, so add 1 (clamped to width).
-    let end_col_exclusive = (end.1 + 1).min(cols);
-    parser.screen().contents_between(start.0, start.1, end_row, end_col_exclusive)
+
+    /// Written straight to stdout from the PTY reader thread. That races with
+    /// ratatui's draws only at write-call boundaries, and one OSC 52 write
+    /// neither moves the cursor nor touches SGR state, so a frame can't be
+    /// corrupted by landing between two of ratatui's own writes.
+    fn emit(payload: &[u8]) {
+        use std::io::Write;
+        let mut stdout = io::stdout();
+        let _ = stdout.write_all(b"\x1b]52;");
+        let _ = stdout.write_all(payload);
+        let _ = stdout.write_all(b"\x07");
+        let _ = stdout.flush();
+    }
 }
 
 fn modifier_code(mods: KeyModifiers) -> u8 {
@@ -707,10 +756,6 @@ async fn run_app(state: &mut AppState) -> Result<()> {
     // stale/frozen frames.
     let mut last_mirror_refresh = tokio::time::Instant::now();
     let mut current_switch_task: Option<tokio::task::JoinHandle<()>> = None;
-    // We defer the host-terminal's left-Down in the preview so we can decide
-    // (on the next event) whether the user is dragging-to-select (we keep it)
-    // or just clicking (we forward Down+Up to the embedded PTY).
-    let mut pending_pty_down: Option<crossterm::event::MouseEvent> = None;
 
     loop {
         if tokio::time::Instant::now() > last_sync_update + Duration::from_millis(200) {
@@ -930,9 +975,13 @@ async fn run_app(state: &mut AppState) -> Result<()> {
 
                             let reader_task = tokio::task::spawn_blocking(move || {
                                 let mut buf = [0u8; 4096];
+                                let mut clipboard = Osc52Relay::default();
                                 loop {
                                     match std::io::Read::read(&mut reader, &mut buf) {
                                         Ok(n) if n > 0 => {
+                                            // vt100 drops OSC 52, so scan for it
+                                            // before handing the bytes over.
+                                            clipboard.feed(&buf[..n]);
                                             if let Ok(mut p) = parser_clone.write() {
                                                 p.process(&buf[..n]);
                                             }
@@ -1072,106 +1121,30 @@ async fn run_app(state: &mut AppState) -> Result<()> {
                     }
                 }
 
-                // Sidebar click clears any lingering preview selection so the
-                // highlight doesn't outlive the user's attention there.
-                if mouse.column < state.sidebar_cols
-                    && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
-                {
-                    state.preview_selection = None;
-                }
-
-                // Preview area: intercept plain (no-modifier) left drags as our
-                // own selection (so we can copy reflowed text), forward
-                // everything else to the embedded PTY.
+                // Preview area: relay to the embedded tmux client and let tmux
+                // decide what the event means. It is a real client, so with
+                // `mouse on` it handles pane focus, copy-mode drag-select, wheel
+                // scrollback and border-drag resize itself; with mouse off it
+                // passes events down to whichever app asked for them.
                 if let Some(term) = &active_terminal {
                     if mouse.column >= state.sidebar_cols {
-                        let x_offset = state.sidebar_cols;
-                        let y_offset = 0u16;
-                        let no_mods = mouse.modifiers.is_empty();
                         let (vt_rows, vt_cols, mouse_mode) = if let Ok(p) = term.parser.read() {
                             let (r, c) = p.screen().size();
                             (r, c, p.screen().mouse_protocol_mode())
                         } else {
                             (0u16, 0u16, vt100::MouseProtocolMode::None)
                         };
-                        let max_row = vt_rows.saturating_sub(1);
-                        let max_col = vt_cols.saturating_sub(1);
-                        let vt_row = mouse.row.min(max_row);
-                        let vt_col = mouse.column.saturating_sub(state.sidebar_cols).min(max_col);
 
-                        let mut handled = false;
-                        if no_mods && vt_rows > 0 && vt_cols > 0 {
-                            match mouse.kind {
-                                MouseEventKind::Down(MouseButton::Left) => {
-                                    state.preview_selection = None;
-                                    pending_pty_down = Some(mouse);
-                                    handled = true;
-                                }
-                                MouseEventKind::Drag(MouseButton::Left) => {
-                                    let anchor = if let Some(d) = pending_pty_down.take() {
-                                        let ax = d
-                                            .column
-                                            .saturating_sub(state.sidebar_cols)
-                                            .min(max_col);
-                                        let ay = d.row.min(max_row);
-                                        (ay, ax)
-                                    } else if let Some(sel) = &state.preview_selection {
-                                        sel.anchor
-                                    } else {
-                                        (vt_row, vt_col)
-                                    };
-                                    state.preview_selection =
-                                        Some(crate::state::PreviewSelection {
-                                            anchor,
-                                            head: (vt_row, vt_col),
-                                        });
-                                    handled = true;
-                                }
-                                MouseEventKind::Up(MouseButton::Left) => {
-                                    if let Some(sel) = state.preview_selection.clone() {
-                                        let text = if let Ok(parser) = term.parser.read() {
-                                            extract_selection_text(&parser, sel.anchor, sel.head)
-                                        } else {
-                                            String::new()
-                                        };
-                                        if !text.trim().is_empty() {
-                                            osc52_copy(&text);
-                                        }
-                                        pending_pty_down = None;
-                                        handled = true;
-                                    } else if let Some(down) = pending_pty_down.take() {
-                                        // Plain click (no drag) — replay the
-                                        // suppressed Down, then forward Up, but
-                                        // only if the app is tracking the mouse.
-                                        if should_forward_mouse(&down.kind, mouse_mode) {
-                                            if let Some(bytes) =
-                                                encode_mouse(&down, x_offset, y_offset)
-                                            {
-                                                let _ = term.pty_writer.send(bytes);
-                                            }
-                                        }
-                                        if should_forward_mouse(&mouse.kind, mouse_mode) {
-                                            if let Some(bytes) =
-                                                encode_mouse(&mouse, x_offset, y_offset)
-                                            {
-                                                let _ = term.pty_writer.send(bytes);
-                                            }
-                                        }
-                                        handled = true;
-                                    }
-                                }
-                                MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
-                                    // Scrolling shifts the buffer, so any
-                                    // existing selection's coordinates would
-                                    // stop matching the visible content.
-                                    state.preview_selection = None;
-                                }
-                                _ => {}
-                            }
-                        }
-
-                        if !handled && should_forward_mouse(&mouse.kind, mouse_mode) {
-                            if let Some(bytes) = encode_mouse(&mouse, x_offset, y_offset) {
+                        if vt_rows > 0
+                            && vt_cols > 0
+                            && should_forward_mouse(&mouse.kind, mouse_mode)
+                        {
+                            // Clamp into the mirror's grid: our bottom row is
+                            // the command bar, which the client has no row for.
+                            let mut m = mouse;
+                            m.row = m.row.min(vt_rows - 1);
+                            m.column = m.column.min(state.sidebar_cols + vt_cols - 1);
+                            if let Some(bytes) = encode_mouse(&m, state.sidebar_cols, 0) {
                                 let _ = term.pty_writer.send(bytes);
                             }
                         }
@@ -1204,10 +1177,6 @@ async fn run_app(state: &mut AppState) -> Result<()> {
             }
 
             if let Event::Key(key) = ev {
-                // Any keystroke ends the lifetime of a finalised preview
-                // selection — the user has clearly moved on.
-                state.preview_selection = None;
-
                 // Rename mode intercepts all input
                 if let crate::state::InputMode::Renaming { .. } = &state.input_mode {
                     match key.code {

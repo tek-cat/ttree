@@ -18,21 +18,9 @@ pub struct AppState {
     pub expanded_ids: HashSet<String>,
     pub last_target_id: Option<String>,
     pub sidebar_cols: u16,
-    pub preview_selection: Option<PreviewSelection>,
     /// Colors adopted from the user's tmux status bar at startup. Not persisted;
     /// re-read from the live tmux server each launch.
     pub theme: crate::theme::Theme,
-}
-
-/// A selection inside the embedded preview's vt100 grid. Coordinates are
-/// (row, col) in the preview's local frame. Tuple ordering doubles as
-/// reading-order comparison (row first), which is what we want when
-/// normalising anchor/head into start/end for highlight painting and the
-/// `contents_between` clipboard extraction.
-#[derive(Debug, Clone)]
-pub struct PreviewSelection {
-    pub anchor: (u16, u16),
-    pub head: (u16, u16),
 }
 
 #[derive(Serialize, Deserialize)]
@@ -55,7 +43,6 @@ impl Default for AppState {
             expanded_ids: HashSet::new(),
             last_target_id: None,
             sidebar_cols: 0,
-            preview_selection: None,
             theme: crate::theme::Theme::default(),
         }
     }
