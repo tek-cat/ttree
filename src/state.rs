@@ -1,3 +1,5 @@
+use fuzzy_matcher::skim::SkimMatcherV2;
+use fuzzy_matcher::FuzzyMatcher;
 use indexmap::IndexMap;
 use ratatui::layout::Rect;
 use serde::{Deserialize, Serialize};
@@ -27,6 +29,12 @@ pub struct AppState {
     /// Set when the selection lands in our own session, so the preview can say
     /// why it is empty instead of just going blank.
     pub mirror_suppressed: bool,
+    /// Live fuzzy filter over the tree rows. `None` is no filter at all;
+    /// `Some("")` is filter mode opened with nothing typed yet, which still
+    /// shows everything. Deliberately not persisted: a filter is a transient
+    /// way to find one session, and reopening ttree to a tree that hides most
+    /// of its rows would just look broken.
+    pub filter: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -52,8 +60,19 @@ impl Default for AppState {
             theme: crate::theme::Theme::default(),
             own_session: None,
             mirror_suppressed: false,
+            filter: None,
         }
     }
+}
+
+/// One flattened tree row: the id it is selected by, the text the sidebar
+/// prints for it, and the row that owns it. The parent link exists only for
+/// filtering: a pane that survives has to drag its headers along with it, or
+/// the tree stops saying which session the pane belongs to.
+struct Row {
+    id: String,
+    label: String,
+    parent: Option<usize>,
 }
 
 impl AppState {
@@ -99,8 +118,12 @@ impl AppState {
         state
     }
 
-    pub fn get_dynamic_visible_items(&self) -> Vec<String> {
-        let mut list = Vec::new();
+    /// Flatten the tree into rows, parents before their children, in the exact
+    /// order and with the exact labels `ui::tree` prints. The labels have to
+    /// agree with what is on screen: the filter matches them, and a search that
+    /// hit text the user cannot see would look like a bug.
+    fn flatten_rows(&self) -> Vec<Row> {
+        let mut rows: Vec<Row> = Vec::new();
         for session in self.sessions.values() {
             let num_windows = session.windows.len();
             let total_panes: usize = session
@@ -111,7 +134,9 @@ impl AppState {
                 .sum();
 
             if num_windows <= 1 && total_panes <= 1 {
-                // Single leaf: use pane ID (or session ID if no panes yet)
+                // Single leaf: use pane ID (or session ID if no panes yet).
+                // The row is a pane but it is labelled with the session name,
+                // because that is the only name worth showing at this size.
                 let leaf_id = session
                     .windows
                     .first()
@@ -119,35 +144,65 @@ impl AppState {
                     .and_then(|w| w.panes.first())
                     .cloned()
                     .unwrap_or(session.id.clone());
-                list.push(leaf_id);
+                rows.push(Row { id: leaf_id, label: session.name.clone(), parent: None });
             } else if num_windows == 1 {
                 // Session header + panes directly (window level skipped)
-                list.push(session.id.clone());
+                let sidx = rows.len();
+                rows.push(Row {
+                    id: session.id.clone(),
+                    label: session.name.clone(),
+                    parent: None,
+                });
                 if session.expanded {
                     if let Some(window) =
                         session.windows.first().and_then(|wid| self.windows.get(wid))
                     {
                         for pid in &window.panes {
-                            list.push(pid.clone());
+                            rows.push(Row {
+                                id: pid.clone(),
+                                label: self.pane_label(pid),
+                                parent: Some(sidx),
+                            });
                         }
                     }
                 }
             } else {
                 // Full hierarchy
-                list.push(session.id.clone());
+                let sidx = rows.len();
+                rows.push(Row {
+                    id: session.id.clone(),
+                    label: session.name.clone(),
+                    parent: None,
+                });
                 if session.expanded {
                     for wid in &session.windows {
                         if let Some(window) = self.windows.get(wid) {
                             if window.panes.len() <= 1 {
-                                // Window leaf: use pane ID
+                                // Window leaf: use pane ID, and the pane's name
+                                // when there is a pane to take one from.
                                 let leaf_id = window.panes.first().cloned().unwrap_or(wid.clone());
-                                list.push(leaf_id);
+                                let label = window
+                                    .panes
+                                    .first()
+                                    .and_then(|pid| self.panes.get(pid))
+                                    .map(|p| p.display_name().to_string())
+                                    .unwrap_or_else(|| window.name.clone());
+                                rows.push(Row { id: leaf_id, label, parent: Some(sidx) });
                             } else {
                                 // Window header
-                                list.push(wid.clone());
+                                let widx = rows.len();
+                                rows.push(Row {
+                                    id: wid.clone(),
+                                    label: window.name.clone(),
+                                    parent: Some(sidx),
+                                });
                                 if window.expanded {
                                     for pid in &window.panes {
-                                        list.push(pid.clone());
+                                        rows.push(Row {
+                                            id: pid.clone(),
+                                            label: self.pane_label(pid),
+                                            parent: Some(widx),
+                                        });
                                     }
                                 }
                             }
@@ -156,7 +211,61 @@ impl AppState {
                 }
             }
         }
-        list
+        rows
+    }
+
+    /// The label for a pane row, empty when the pane has gone away between
+    /// syncs (the row still exists so ids stay stable for one more frame).
+    fn pane_label(&self, pane_id: &str) -> String {
+        self.panes.get(pane_id).map(|p| p.display_name().to_string()).unwrap_or_default()
+    }
+
+    /// True when the filter is actually narrowing the tree. Filter mode with an
+    /// empty query is not "active": nothing is hidden, so nothing should be
+    /// dimmed, annotated or explained.
+    pub fn filter_active(&self) -> bool {
+        self.filter.as_ref().is_some_and(|q| !q.is_empty())
+    }
+
+    pub fn get_dynamic_visible_items(&self) -> Vec<String> {
+        let rows = self.flatten_rows();
+
+        let query = match &self.filter {
+            Some(q) if !q.is_empty() => q,
+            // No filter, or filter mode with nothing typed yet: every row stands.
+            _ => return rows.into_iter().map(|r| r.id).collect(),
+        };
+
+        let matcher = SkimMatcherV2::default();
+        let mut keep = vec![false; rows.len()];
+        for (i, row) in rows.iter().enumerate() {
+            if matcher.fuzzy_match(&row.label, query).is_some() {
+                keep[i] = true;
+                // A matching pane means nothing on its own, so light up the
+                // headers above it. Parents always precede their children, so
+                // walking the links up can only revisit rows already decided.
+                let mut parent = row.parent;
+                while let Some(p) = parent {
+                    keep[p] = true;
+                    parent = rows[p].parent;
+                }
+            }
+        }
+
+        rows.into_iter().zip(keep).filter(|(_, k)| *k).map(|(row, _)| row.id).collect()
+    }
+
+    /// Put the selection back on a row that exists. Filtering can hide whatever
+    /// was selected, and every action downstream (preview, attach, rename) reads
+    /// the selection, so it must never point at a row nobody can see.
+    /// Called from the key handling, which decides when the filter changed.
+    pub fn clamp_selection_to_visible(&mut self) {
+        let visible = self.get_dynamic_visible_items();
+        let still_there =
+            self.focus.selected_id.as_ref().is_some_and(|sel| visible.iter().any(|id| id == sel));
+        if !still_there {
+            self.focus.selected_id = visible.first().cloned();
+        }
     }
 
     pub fn move_selection_up(&mut self) {
@@ -357,14 +466,41 @@ pub struct Pane {
     pub region: Option<Rect>,
 }
 
+impl Pane {
+    /// What the tree prints for a pane: the running command when tmux reports
+    /// one, else the pane title. Lives here rather than in the widget so the
+    /// filter matches the same text the sidebar draws.
+    pub fn display_name(&self) -> &str {
+        if !self.current_command.is_empty() {
+            &self.current_command
+        } else {
+            &self.title
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum InputMode {
     TuiNormal,
+    /// Renaming whatever is selected. The target is a session or a window id,
+    /// and which one decides the tmux command that eventually runs.
     Renaming {
-        session_id: SessionId,
+        target_id: String,
         input: String,
     },
+    /// A destructive action holding for a y/n. Kills cannot be undone, so they
+    /// never ride on a single keystroke.
+    Confirming {
+        target_id: String,
+        prompt: String,
+    },
     NewSession {
+        input: String,
+    },
+    /// Typing a fuzzy filter into the command bar. The query also lives in
+    /// [`AppState::filter`], which is what the tree reads: the mode is only
+    /// about where keystrokes go, so leaving it keeps the filter applied.
+    Filtering {
         input: String,
     },
     #[allow(dead_code)]
@@ -557,4 +693,74 @@ mod tests {
         st.move_selection_up();
         assert_eq!(st.focus.selected_id, None);
     }
+
+    /// Two sessions: `$alpha` needs a header (two panes), `$beta` collapses to
+    /// one leaf row. Panes are named "sh" unless a test renames them.
+    fn filterable_state() -> AppState {
+        state_with(&[
+            ("$alpha", true, &[("@0", true, &["%0", "%1"])]),
+            ("$beta", true, &[("@1", true, &["%2"])]),
+        ])
+    }
+
+    #[test]
+    fn no_filter_shows_every_row() {
+        let mut st = filterable_state();
+        assert_eq!(st.filter, None);
+        assert!(!st.filter_active());
+        assert_eq!(st.get_dynamic_visible_items(), vec!["$alpha", "%0", "%1", "%2"]);
+
+        // Filter mode open with nothing typed hides nothing: the tree should not
+        // flicker away the moment the key is pressed.
+        st.filter = Some(String::new());
+        assert!(!st.filter_active());
+        assert_eq!(st.get_dynamic_visible_items(), vec!["$alpha", "%0", "%1", "%2"]);
+    }
+
+    #[test]
+    fn a_matching_pane_keeps_its_session_header() {
+        let mut st = filterable_state();
+        st.panes.get_mut("%1").unwrap().current_command = "vim".into();
+        st.filter = Some("vim".into());
+
+        assert!(st.filter_active());
+        // $alpha survives only as %1's ancestor; %0 ("sh") and %2 ("beta") go.
+        assert_eq!(st.get_dynamic_visible_items(), vec!["$alpha", "%1"]);
+    }
+
+    #[test]
+    fn a_matching_pane_keeps_its_window_header_too() {
+        // Two windows, so the session shows the full hierarchy and the match
+        // sits two levels deep.
+        let mut st =
+            state_with(&[("$s", true, &[("@a", true, &["%0", "%1"]), ("@b", true, &["%2"])])]);
+        st.panes.get_mut("%1").unwrap().current_command = "htop".into();
+        st.filter = Some("htop".into());
+
+        assert_eq!(st.get_dynamic_visible_items(), vec!["$s", "@a", "%1"]);
+    }
+
+    #[test]
+    fn a_filter_matching_nothing_empties_the_tree() {
+        let mut st = filterable_state();
+        st.filter = Some("zzzz".into());
+        assert!(st.get_dynamic_visible_items().is_empty());
+    }
+
+    #[test]
+    fn filtering_out_the_selection_moves_it_to_the_first_visible_row() {
+        let mut st = filterable_state();
+        st.panes.get_mut("%1").unwrap().current_command = "vim".into();
+        st.focus.selected_id = Some("%2".into()); // in $beta, about to be hidden
+
+        st.filter = Some("vim".into());
+        st.clamp_selection_to_visible();
+        assert_eq!(st.focus.selected_id.as_deref(), Some("$alpha"));
+
+        // A selection that survives the filter is left where it is.
+        st.focus.selected_id = Some("%1".into());
+        st.clamp_selection_to_visible();
+        assert_eq!(st.focus.selected_id.as_deref(), Some("%1"));
+    }
 }
+// probe

@@ -3,6 +3,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     symbols,
+    text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph},
     Frame,
 };
@@ -86,14 +87,31 @@ pub fn render(
         frame.render_widget(note, Rect::new(preview_area.x, y, preview_area.width, 1));
     }
 
-    // Command Bar - contextual based on panel mode
-    let (cmd_text, mode_label) = match state.focus.panel {
-        crate::state::Panel::Tree => {
-            ("SPACE toggle  ENTER preview  a attach  n new  r rename  ? help  Q quit", "TREE")
+    // Command Bar - the filter prompt when one is being typed, otherwise the
+    // key hints for the focused panel.
+    let (cmd_text, mode_label) = match (&state.input_mode, &state.focus.panel) {
+        // The bar doubles as the filter's input line rather than a popup: a
+        // popup would cover the very rows the query is narrowing down.
+        (crate::state::InputMode::Filtering { input }, _) => (format!("/{}█", input), "FILTER"),
+        (_, crate::state::Panel::Tree) => (
+            "SPACE toggle  ENTER preview  a attach  n new  r rename  ? help  Q quit".to_string(),
+            "TREE",
+        ),
+        (_, crate::state::Panel::Preview) => {
+            ("C-b d  back to tree    C-b <key>  pass prefix to tmux".to_string(), "PREVIEW")
         }
-        crate::state::Panel::Preview => {
-            ("C-b d  back to tree    C-b <key>  pass prefix to tmux", "PREVIEW")
+    };
+
+    // A filter left applied after typing stops is why rows are missing, so it
+    // keeps a quiet seat at the end of the hints.
+    let filter_note = match &state.filter {
+        Some(q)
+            if !q.is_empty()
+                && !matches!(state.input_mode, crate::state::InputMode::Filtering { .. }) =>
+        {
+            Some(format!("   /{}  (ESC clears)", q))
         }
+        _ => None,
     };
 
     // Bar background for the entire row (tmux status-style bg).
@@ -117,9 +135,13 @@ pub fn render(
         chunks[1].width.saturating_sub(cmd_offset),
         1,
     );
-    let cmd_line = Paragraph::new(cmd_text)
-        .style(Style::default().bg(theme.bar_bg).fg(theme.bar_fg))
-        .alignment(Alignment::Left);
+    let bar_style = Style::default().bg(theme.bar_bg).fg(theme.bar_fg);
+    let mut cmd_spans = vec![Span::styled(cmd_text, bar_style)];
+    if let Some(note) = filter_note {
+        cmd_spans.push(Span::styled(note, bar_style.add_modifier(Modifier::DIM)));
+    }
+    let cmd_line =
+        Paragraph::new(Line::from(cmd_spans)).style(bar_style).alignment(Alignment::Left);
     frame.render_widget(cmd_line, cmd_area);
 
     // Rename Popup
@@ -132,8 +154,23 @@ pub fn render(
         let popup_area = Rect::new(x, y, popup_width.min(area.width), popup_height);
         let display = format!(" {}_", input);
         let popup = Paragraph::new(display)
-            .block(Block::default().title(" Rename Session ").borders(Borders::ALL))
+            .block(Block::default().title(" Rename ").borders(Borders::ALL))
             .style(Style::default());
+        frame.render_widget(Clear, popup_area);
+        frame.render_widget(popup, popup_area);
+    }
+
+    // Confirm popup for anything destructive.
+    if let crate::state::InputMode::Confirming { prompt, .. } = &state.input_mode {
+        let popup_width = 52u16;
+        let popup_height = 3u16;
+        let area = frame.area();
+        let x = area.x + area.width.saturating_sub(popup_width) / 2;
+        let y = area.y + area.height.saturating_sub(popup_height) / 2;
+        let popup_area = Rect::new(x, y, popup_width.min(area.width), popup_height);
+        let popup = Paragraph::new(format!(" {}  [y/N]", prompt))
+            .block(Block::default().title(" Confirm ").borders(Borders::ALL))
+            .style(Style::default().fg(theme.icon));
         frame.render_widget(Clear, popup_area);
         frame.render_widget(popup, popup_area);
     }
@@ -165,7 +202,11 @@ pub fn render(
             "  l / Right     expand node / jump to first child",
             "  Space         toggle expand/collapse",
             "  n             create new session",
-            "  r             rename selected session",
+            "  c             create window in selected session",
+            "  % / \"         split selected pane right / below",
+            "  r             rename selected session or window",
+            "  x             kill selected (asks first)",
+            "  /             filter the tree (ESC clears)",
             "  Enter         open preview panel",
             "  a             attach to selected session/window/pane",
             "  C-p           toggle tree / preview focus",
@@ -173,8 +214,9 @@ pub fn render(
             "  q / C-c       quit",
             "",
             "Preview mode:",
-            "  C-b d         return to tree mode",
-            "  C-b <key>     send tmux prefix + key",
+            "  <prefix> d    return to tree mode (prefix follows tmux)",
+            "  <prefix> <key>  send tmux prefix + key",
+            "  <prefix> <prefix>  send one prefix through, for nested tmux",
             "  (all keys)    forwarded to embedded terminal",
             "",
             "Mouse:",

@@ -16,11 +16,13 @@ use std::{
     time::Duration,
 };
 
+mod actions;
 mod state;
 mod theme;
 mod tmux_client;
 mod ui;
 
+use crate::actions::Actions;
 use crate::state::{AppState, EmbeddedTerminal, Panel};
 use crate::tmux_client::Tmux;
 
@@ -705,6 +707,33 @@ fn restore_window_size_blocking(session: &str, prior: &str) {
     let _ = cmd.output();
 }
 
+/// Human wording for what a kill is about to destroy, so the confirm prompt
+/// names the thing rather than an opaque id like `%12`.
+fn describe_kill_target(state: &AppState, id: &str) -> String {
+    if let Some(session) = state.sessions.get(id) {
+        let windows = session.windows.len();
+        return format!(
+            "Kill session \"{}\" and its {} window{}?",
+            session.name,
+            windows,
+            if windows == 1 { "" } else { "s" }
+        );
+    }
+    if let Some(window) = state.windows.get(id) {
+        let panes = window.panes.len();
+        return format!(
+            "Kill window \"{}\" and its {} pane{}?",
+            window.name,
+            panes,
+            if panes == 1 { "" } else { "s" }
+        );
+    }
+    if let Some(pane) = state.panes.get(id) {
+        return format!("Kill pane running {}?", pane.display_name());
+    }
+    format!("Kill {}?", id)
+}
+
 /// The window and pane a selection points at, for driving the mirror's own
 /// current window without touching anyone else's.
 fn window_and_pane_of(state: &AppState, id: &str) -> (Option<String>, Option<String>) {
@@ -1049,7 +1078,7 @@ async fn refresh_embedded_client(pid: u32) {
 }
 
 async fn run_app(state: &mut AppState) -> Result<()> {
-    let last_error: Option<String> = None;
+    let mut last_error: Option<String> = None;
     let mut active_terminal: Option<EmbeddedTerminal> = None;
     let mut pty_task: Option<tokio::task::JoinHandle<()>> = None;
     let mut last_selected_id: Option<String> = None;
@@ -1681,15 +1710,21 @@ async fn run_app(state: &mut AppState) -> Result<()> {
                             }
                         }
                         KeyCode::Enter => {
-                            if let crate::state::InputMode::Renaming { session_id, input } =
+                            if let crate::state::InputMode::Renaming { target_id, input } =
                                 state.input_mode.clone()
                             {
                                 let trimmed = input.trim().to_string();
                                 if !trimmed.is_empty() {
-                                    let _ = tokio::process::Command::new("tmux")
-                                        .args(["rename-session", "-t", &session_id, &trimmed])
-                                        .output()
-                                        .await;
+                                    // The sigil says what we are renaming, and
+                                    // Actions refuses anything that isn't a real id.
+                                    let result = if target_id.starts_with('@') {
+                                        Actions::rename_window(&target_id, &trimmed).await
+                                    } else {
+                                        Actions::rename_session(&target_id, &trimmed).await
+                                    };
+                                    if let Err(e) = result {
+                                        last_error = Some(e.to_string());
+                                    }
                                 }
                             }
                             state.input_mode = crate::state::InputMode::TuiNormal;
@@ -1737,6 +1772,79 @@ async fn run_app(state: &mut AppState) -> Result<()> {
                             state.input_mode = crate::state::InputMode::TuiNormal;
                         }
                         _ => {}
+                    }
+                    continue;
+                }
+
+                // Filter mode intercepts all input. Every keystroke narrows the
+                // tree straight away, so the user is always typing towards
+                // something they can see.
+                if let crate::state::InputMode::Filtering { .. } = &state.input_mode {
+                    let mut edited = false;
+                    match key.code {
+                        KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            if let crate::state::InputMode::Filtering { input } =
+                                &mut state.input_mode
+                            {
+                                input.push(c);
+                                edited = true;
+                            }
+                        }
+                        KeyCode::Backspace => {
+                            if let crate::state::InputMode::Filtering { input } =
+                                &mut state.input_mode
+                            {
+                                input.pop();
+                                edited = true;
+                            }
+                        }
+                        // Enter keeps the filter and hands the keys back to the
+                        // tree, so you can navigate what you just narrowed to.
+                        KeyCode::Enter => {
+                            state.input_mode = crate::state::InputMode::TuiNormal;
+                        }
+                        KeyCode::Esc => {
+                            state.filter = None;
+                            state.input_mode = crate::state::InputMode::TuiNormal;
+                            state.clamp_selection_to_visible();
+                        }
+                        _ => {}
+                    }
+                    if edited {
+                        let query = if let crate::state::InputMode::Filtering { input } =
+                            &state.input_mode
+                        {
+                            Some(input.clone())
+                        } else {
+                            None
+                        };
+                        if let Some(query) = query {
+                            state.filter = Some(query);
+                            state.clamp_selection_to_visible();
+                        }
+                    }
+                    continue;
+                }
+
+                // A pending destructive action. Only an explicit y goes through,
+                // and every other key is a cancel, because the cost of a stray
+                // keystroke here is someone's running work.
+                if let crate::state::InputMode::Confirming { target_id, .. } = &state.input_mode {
+                    let target = target_id.clone();
+                    let confirmed = matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y'));
+                    state.input_mode = crate::state::InputMode::TuiNormal;
+                    if confirmed {
+                        let result = if target.starts_with('$') {
+                            Actions::kill_session(&target).await
+                        } else if target.starts_with('@') {
+                            Actions::kill_window(&target).await
+                        } else {
+                            Actions::kill_pane(&target).await
+                        };
+                        if let Err(e) = result {
+                            last_error = Some(e.to_string());
+                        }
+                        let _ = sync_state(state).await;
                     }
                     continue;
                 }
@@ -1797,6 +1905,60 @@ async fn run_app(state: &mut AppState) -> Result<()> {
                         KeyCode::Char('?') => {
                             state.show_help = true;
                         }
+                        KeyCode::Char('/') => {
+                            state.input_mode =
+                                crate::state::InputMode::Filtering { input: String::new() };
+                            state.filter = Some(String::new());
+                        }
+                        // Outside filter mode Esc is how you get the whole tree
+                        // back, since a narrowed tree hides rows silently.
+                        KeyCode::Esc if state.filter.is_some() => {
+                            state.filter = None;
+                            state.clamp_selection_to_visible();
+                        }
+                        KeyCode::Char('x') => {
+                            if let Some(id) = state.focus.selected_id.clone() {
+                                let prompt = describe_kill_target(state, &id);
+                                state.input_mode =
+                                    crate::state::InputMode::Confirming { target_id: id, prompt };
+                            }
+                        }
+                        KeyCode::Char('c') => {
+                            if let Some(sid) = state
+                                .focus
+                                .selected_id
+                                .as_deref()
+                                .and_then(|id| session_id_of(state, id))
+                            {
+                                if let Err(e) = Actions::new_window(&sid).await {
+                                    last_error = Some(e.to_string());
+                                }
+                                let _ = sync_state(state).await;
+                            }
+                        }
+                        // The same split keys tmux itself uses, so the muscle
+                        // memory carries over.
+                        KeyCode::Char('%') | KeyCode::Char('"') => {
+                            let pane = state
+                                .focus
+                                .selected_id
+                                .as_deref()
+                                .filter(|id| state.panes.contains_key(*id))
+                                .map(|id| id.to_string())
+                                .or_else(|| {
+                                    let sid = state.focus.selected_id.as_deref()?;
+                                    let (window, _) = window_and_pane_of(state, sid);
+                                    let window = window?;
+                                    state.windows.get(&window)?.panes.first().cloned()
+                                });
+                            if let Some(pane) = pane {
+                                let vertical = key.code == KeyCode::Char('"');
+                                if let Err(e) = Actions::split_pane(&pane, vertical).await {
+                                    last_error = Some(e.to_string());
+                                }
+                                let _ = sync_state(state).await;
+                            }
+                        }
                         KeyCode::Enter => {
                             state.focus.panel = Panel::Preview;
                         }
@@ -1844,14 +2006,31 @@ async fn run_app(state: &mut AppState) -> Result<()> {
                                     None
                                 }
                             });
-                            if let Some(sid) = session_id {
+                            // A window row renames the window; anything else
+                            // renames the session it belongs to.
+                            let selected = state.focus.selected_id.clone();
+                            let window_target = selected
+                                .as_deref()
+                                .filter(|id| state.windows.contains_key(*id))
+                                .map(|id| id.to_string());
+                            if let Some(wid) = window_target {
+                                let current_name = state
+                                    .windows
+                                    .get(&wid)
+                                    .map(|w| w.name.clone())
+                                    .unwrap_or_default();
+                                state.input_mode = crate::state::InputMode::Renaming {
+                                    target_id: wid,
+                                    input: current_name,
+                                };
+                            } else if let Some(sid) = session_id {
                                 let current_name = state
                                     .sessions
                                     .get(&sid)
                                     .map(|s| s.name.clone())
                                     .unwrap_or_default();
                                 state.input_mode = crate::state::InputMode::Renaming {
-                                    session_id: sid,
+                                    target_id: sid,
                                     input: current_name,
                                 };
                             }

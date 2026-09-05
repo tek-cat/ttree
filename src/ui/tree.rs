@@ -1,4 +1,4 @@
-use crate::state::{AppState, Pane};
+use crate::state::AppState;
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -6,6 +6,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::Widget,
 };
+use std::collections::HashSet;
 
 pub struct TreeWidget<'a> {
     state: &'a AppState,
@@ -14,14 +15,6 @@ pub struct TreeWidget<'a> {
 impl<'a> TreeWidget<'a> {
     pub fn new(state: &'a AppState) -> Self {
         Self { state }
-    }
-}
-
-fn pane_name(pane: &Pane) -> &str {
-    if !pane.current_command.is_empty() {
-        &pane.current_command
-    } else {
-        &pane.title
     }
 }
 
@@ -42,6 +35,26 @@ impl<'a> Widget for TreeWidget<'a> {
         let icon_color = self.state.theme.icon;
         let active_fg = self.state.theme.active;
         let selection_bg = self.state.theme.selection_bg;
+
+        // Ask the model which rows survive the filter instead of re-running the
+        // match here: navigation, scrolling and drawing all index the same list,
+        // and a second opinion about it would put the selection off screen.
+        let visible: Option<HashSet<String>> = self
+            .state
+            .filter_active()
+            .then(|| self.state.get_dynamic_visible_items().into_iter().collect());
+        let keep = |id: &str| visible.as_ref().is_none_or(|v| v.contains(id));
+
+        // A filter matching nothing empties the sidebar, which reads as a crash
+        // rather than as a search miss unless we say so.
+        if visible.as_ref().is_some_and(|v| v.is_empty()) {
+            let note = Line::from(Span::styled(
+                " no matches",
+                Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+            ));
+            buf.set_line(area.x, area.y, &note, area.width);
+            return;
+        }
 
         for session in self.state.sessions.values() {
             if y >= area.bottom() {
@@ -73,6 +86,10 @@ impl<'a> Widget for TreeWidget<'a> {
                     .and_then(|w| w.panes.first())
                     .and_then(|pid| self.state.panes.get(pid));
 
+                if !keep(&leaf_id) {
+                    continue;
+                }
+
                 let label = session.name.clone();
                 let is_active = pane.map(|p| p.active).unwrap_or(session.attached);
                 let is_sel = Some(&leaf_id) == self.state.focus.selected_id.as_ref();
@@ -90,6 +107,13 @@ impl<'a> Widget for TreeWidget<'a> {
                 line_idx += 1;
             } else if num_windows == 1 {
                 // ── Case B: session header + panes directly ──────────────────
+                // Dropping the header drops its panes with it: the model keeps
+                // the ancestors of every match, so a hidden header has no
+                // matching panes underneath.
+                if !keep(&session.id) {
+                    continue;
+                }
+
                 let is_sel = Some(&session.id) == self.state.focus.selected_id.as_ref();
 
                 if line_idx >= scroll {
@@ -113,10 +137,16 @@ impl<'a> Widget for TreeWidget<'a> {
                     if let Some(window) =
                         session.windows.first().and_then(|wid| self.state.windows.get(wid))
                     {
-                        let num_panes = window.panes.len();
+                        // With a filter on, the last row drawn is not
+                        // necessarily the last pane, so the corner connector has
+                        // to track the surviving rows.
+                        let last_kept = window.panes.iter().rposition(|pid| keep(pid));
                         for (idx, pid) in window.panes.iter().enumerate() {
                             if y >= area.bottom() {
                                 break;
+                            }
+                            if !keep(pid) {
+                                continue;
                             }
                             if let Some(pane) = self.state.panes.get(pid) {
                                 if line_idx >= scroll {
@@ -124,14 +154,14 @@ impl<'a> Widget for TreeWidget<'a> {
                                         Some(pid) == self.state.focus.selected_id.as_ref();
                                     let style = sel_style(is_psel, selection_bg);
                                     let fg = if pane.active { active_fg } else { Color::Reset };
-                                    let connector = if idx == num_panes - 1 {
+                                    let connector = if Some(idx) == last_kept {
                                         "  └─ "
                                     } else {
                                         "  ├─ "
                                     };
                                     let line = Line::from(vec![
                                         Span::styled(connector, style),
-                                        Span::styled(pane_name(pane).to_string(), style.fg(fg)),
+                                        Span::styled(pane.display_name().to_string(), style.fg(fg)),
                                     ]);
                                     buf.set_line(area.x, y, &line, area.width);
                                     y += 1;
@@ -143,6 +173,10 @@ impl<'a> Widget for TreeWidget<'a> {
                 }
             } else {
                 // ── Case C: full hierarchy ───────────────────────────────────
+                if !keep(&session.id) {
+                    continue;
+                }
+
                 let is_sel = Some(&session.id) == self.state.focus.selected_id.as_ref();
 
                 if line_idx >= scroll {
@@ -173,6 +207,9 @@ impl<'a> Widget for TreeWidget<'a> {
                             if num_panes <= 1 {
                                 // Window is a leaf — show pane name
                                 let leaf_id = window.panes.first().cloned().unwrap_or(wid.clone());
+                                if !keep(&leaf_id) {
+                                    continue;
+                                }
                                 let is_wsel =
                                     Some(&leaf_id) == self.state.focus.selected_id.as_ref();
                                 if line_idx >= scroll {
@@ -181,7 +218,7 @@ impl<'a> Widget for TreeWidget<'a> {
                                         .panes
                                         .first()
                                         .and_then(|pid| self.state.panes.get(pid))
-                                        .map(|p| (pane_name(p).to_string(), p.active))
+                                        .map(|p| (p.display_name().to_string(), p.active))
                                         .unwrap_or_else(|| (window.name.clone(), window.active));
                                     let fg = if is_active { active_fg } else { Color::Reset };
                                     let line = Line::from(vec![
@@ -194,6 +231,9 @@ impl<'a> Widget for TreeWidget<'a> {
                                 line_idx += 1;
                             } else {
                                 // Window is a header (expandable)
+                                if !keep(wid) {
+                                    continue;
+                                }
                                 let is_wsel = Some(wid) == self.state.focus.selected_id.as_ref();
                                 if line_idx >= scroll {
                                     let style = sel_style(is_wsel, selection_bg);
@@ -209,9 +249,13 @@ impl<'a> Widget for TreeWidget<'a> {
                                 line_idx += 1;
 
                                 if window.expanded {
+                                    let last_kept = window.panes.iter().rposition(|pid| keep(pid));
                                     for (idx, pid) in window.panes.iter().enumerate() {
                                         if y >= area.bottom() {
                                             break;
+                                        }
+                                        if !keep(pid) {
+                                            continue;
                                         }
                                         if let Some(pane) = self.state.panes.get(pid) {
                                             if line_idx >= scroll {
@@ -223,7 +267,7 @@ impl<'a> Widget for TreeWidget<'a> {
                                                 } else {
                                                     Color::Reset
                                                 };
-                                                let connector = if idx == num_panes - 1 {
+                                                let connector = if Some(idx) == last_kept {
                                                     "    └─ "
                                                 } else {
                                                     "    ├─ "
@@ -231,7 +275,7 @@ impl<'a> Widget for TreeWidget<'a> {
                                                 let line = Line::from(vec![
                                                     Span::styled(connector, style),
                                                     Span::styled(
-                                                        pane_name(pane).to_string(),
+                                                        pane.display_name().to_string(),
                                                         style.fg(fg),
                                                     ),
                                                 ]);
