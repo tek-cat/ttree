@@ -439,6 +439,55 @@ impl Osc52Relay {
     }
 }
 
+/// The prefix key ttree reserves for itself, taken from the user's own tmux
+/// `prefix` option rather than assumed to be C-b.
+///
+/// This matters most when ttree runs inside ttree: the outer one claims the
+/// prefix, so an inner one bound to the same key never sees `prefix d`. Give
+/// the two different prefixes and both are reachable. Pressing the prefix twice
+/// still forwards one copy down, which is how you reach a tmux, or another
+/// ttree, further in.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Prefix {
+    /// The letter, for matching a key event.
+    ch: char,
+    /// The control byte a terminal actually sends for it, for forwarding.
+    byte: u8,
+}
+
+impl Default for Prefix {
+    fn default() -> Self {
+        // What ttree hardcoded before this was configurable, and tmux's default.
+        Prefix { ch: 'b', byte: 0x02 }
+    }
+}
+
+impl Prefix {
+    /// Parse a tmux `prefix` option value such as `C-b` or `C-a`. Anything we
+    /// can't map to a control byte (M- bindings, `None`, multi-key prefixes)
+    /// falls back to C-b rather than leaving ttree with no prefix at all.
+    fn parse(value: Option<String>) -> Self {
+        let Some(value) = value else {
+            return Prefix::default();
+        };
+        let Some(rest) = value.trim().strip_prefix("C-") else {
+            return Prefix::default();
+        };
+        let mut chars = rest.chars();
+        match (chars.next(), chars.next()) {
+            (Some(c), None) if c.is_ascii_alphabetic() => {
+                Prefix { ch: c.to_ascii_lowercase(), byte: (c.to_ascii_uppercase() as u8) & 0x1f }
+            }
+            _ => Prefix::default(),
+        }
+    }
+
+    fn matches(&self, key: &crossterm::event::KeyEvent) -> bool {
+        key.modifiers.contains(KeyModifiers::CONTROL)
+            && matches!(key.code, KeyCode::Char(c) if c.eq_ignore_ascii_case(&self.ch))
+    }
+}
+
 fn modifier_code(mods: KeyModifiers) -> u8 {
     let mut m = 1u8;
     if mods.contains(KeyModifiers::SHIFT) {
@@ -684,61 +733,81 @@ async fn restore_forced_window_size() {
     }
 }
 
-/// The session whose tmux `mouse` option we've pinned on while mirroring it,
-/// with its prior session-scoped value (empty = inherited, so restore by
-/// unsetting). Passthrough is only worth anything if tmux is listening for the
-/// mouse: with `mouse off` a drag in the preview selects nothing at all, and
-/// since ttree holds the terminal's mouse itself, tmux copy-mode is the only
-/// selection the preview can offer. Kept in a static so the panic hook can put
-/// it back even if we crash mid-preview.
-static PINNED_MOUSE: std::sync::Mutex<Option<(String, String)>> = std::sync::Mutex::new(None);
+/// Session options ttree pins for as long as it mirrors a session.
+///
+/// `mouse on` is what makes passthrough mean anything: with the mouse off tmux
+/// drops the events, so a drag in the preview selects nothing at all, and since
+/// ttree holds the terminal's mouse itself, tmux copy-mode is the only
+/// selection the preview can offer.
+///
+/// `set-clipboard on` is what carries the result back out. tmux only accepts
+/// and forwards an application's OSC 52 at `on`; its default `external` drops
+/// the sequence, which is exactly where the clipboard dies when a nested ttree
+/// relays a copy up through an intermediate server.
+const MIRROR_OPTIONS: [(&str, &str); 2] = [("mouse", "on"), ("set-clipboard", "on")];
 
-/// Synchronous restore for the panic hook.
-fn restore_mouse_blocking(session: &str, prior: &str) {
-    let mut cmd = std::process::Command::new("tmux");
-    if prior.is_empty() {
-        cmd.args(["set-option", "-u", "-t", session, "mouse"]);
-    } else {
-        cmd.args(["set-option", "-t", session, "mouse", prior]);
-    }
-    let _ = cmd.output();
-}
+/// The session whose [`MIRROR_OPTIONS`] we've pinned, and the prior
+/// session-scoped value of each (empty = inherited, so restore by unsetting).
+/// Kept in a static so the panic hook and the signal handler can put them back
+/// even when the normal restore paths never run.
+type PinnedOptions = (String, Vec<(String, String)>);
+static PINNED_OPTIONS: std::sync::Mutex<Option<PinnedOptions>> = std::sync::Mutex::new(None);
 
-/// Pin a session's `mouse` on, saving the prior session-scoped value
-/// (empty = inherited) so it can be restored.
-async fn pin_mouse_on(session: &str) {
-    let prior = tokio::process::Command::new("tmux")
-        .args(["show-options", "-t", session, "mouse"])
-        .output()
-        .await
-        .ok()
-        .map(|o| {
-            String::from_utf8_lossy(&o.stdout).split_whitespace().nth(1).unwrap_or("").to_string()
-        })
-        .unwrap_or_default();
-    if let Ok(mut guard) = PINNED_MOUSE.lock() {
-        *guard = Some((session.to_string(), prior));
-    }
-    let _ = tokio::process::Command::new("tmux")
-        .args(["set-option", "-t", session, "mouse", "on"])
-        .output()
-        .await;
-}
-
-/// Restore (and clear) whatever session's mouse setting we last pinned, if any.
-async fn restore_pinned_mouse() {
-    let taken = PINNED_MOUSE.lock().ok().and_then(|mut g| g.take());
-    if let Some((session, prior)) = taken {
+/// Synchronous restore for the panic hook and the signal handler.
+fn restore_options_blocking(session: &str, priors: &[(String, String)]) {
+    for (name, prior) in priors {
+        let mut cmd = std::process::Command::new("tmux");
         if prior.is_empty() {
-            let _ = tokio::process::Command::new("tmux")
-                .args(["set-option", "-u", "-t", &session, "mouse"])
-                .output()
-                .await;
+            cmd.args(["set-option", "-u", "-t", session, name]);
         } else {
-            let _ = tokio::process::Command::new("tmux")
-                .args(["set-option", "-t", &session, "mouse", &prior])
-                .output()
-                .await;
+            cmd.args(["set-option", "-t", session, name, prior]);
+        }
+        let _ = cmd.output();
+    }
+}
+
+/// Pin [`MIRROR_OPTIONS`] on a session, recording each prior session-scoped
+/// value (empty = inherited) so it can be restored. Each prior is recorded
+/// before that option is changed, so a crash part-way through still leaves the
+/// restore paths enough to undo what we actually did.
+async fn pin_mirror_options(session: &str) {
+    for (name, value) in MIRROR_OPTIONS {
+        let prior = tokio::process::Command::new("tmux")
+            .args(["show-options", "-t", session, name])
+            .output()
+            .await
+            .ok()
+            .map(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .split_whitespace()
+                    .nth(1)
+                    .unwrap_or("")
+                    .to_string()
+            })
+            .unwrap_or_default();
+        if let Ok(mut guard) = PINNED_OPTIONS.lock() {
+            let entry = guard.get_or_insert_with(|| (session.to_string(), Vec::new()));
+            entry.1.push((name.to_string(), prior));
+        }
+        let _ = tokio::process::Command::new("tmux")
+            .args(["set-option", "-t", session, name, value])
+            .output()
+            .await;
+    }
+}
+
+/// Restore (and clear) whatever session's options we last pinned, if any.
+async fn restore_pinned_options() {
+    let taken = PINNED_OPTIONS.lock().ok().and_then(|mut g| g.take());
+    if let Some((session, priors)) = taken {
+        for (name, prior) in priors {
+            let mut cmd = tokio::process::Command::new("tmux");
+            if prior.is_empty() {
+                cmd.args(["set-option", "-u", "-t", &session, &name]);
+            } else {
+                cmd.args(["set-option", "-t", &session, &name, &prior]);
+            }
+            let _ = cmd.output().await;
         }
     }
 }
@@ -773,8 +842,8 @@ fn restore_pins_blocking() {
     if let Some((session, prior)) = FORCED_WINDOW_SIZE.lock().ok().and_then(|mut g| g.take()) {
         restore_window_size_blocking(&session, &prior);
     }
-    if let Some((session, prior)) = PINNED_MOUSE.lock().ok().and_then(|mut g| g.take()) {
-        restore_mouse_blocking(&session, &prior);
+    if let Some((session, priors)) = PINNED_OPTIONS.lock().ok().and_then(|mut g| g.take()) {
+        restore_options_blocking(&session, &priors);
     }
 }
 
@@ -876,6 +945,9 @@ async fn run_app(state: &mut AppState) -> Result<()> {
     if std::env::var("TMUX").is_ok() {
         state.focus.selected_id = None;
     }
+    // Follow the user's tmux prefix instead of assuming C-b.
+    let prefix = Prefix::parse(Tmux::show_option_global("prefix").await);
+
     // Learn which session we're running in, if any, so we never mirror it.
     state.own_session = match std::env::var("TMUX_PANE") {
         Ok(pane) if !pane.is_empty() => Tmux::session_of_pane(&pane).await,
@@ -887,9 +959,8 @@ async fn run_app(state: &mut AppState) -> Result<()> {
     let mut last_sidebar_cols: u16 = 0;
     let mut dragging_separator = false;
     let mut prefix_pending = false;
-    // The session whose tmux `mouse` option we've currently pinned on. None when
-    // not pinning.
-    let mut pinned_mouse: Option<String> = None;
+    // The session whose options we've currently pinned. None when not pinning.
+    let mut pinned_session: Option<String> = None;
     // The session whose tmux window-size we've currently pinned to `smallest`
     // (only while actively previewing). None when not pinning.
     let mut forced_session: Option<String> = None;
@@ -1229,21 +1300,21 @@ async fn run_app(state: &mut AppState) -> Result<()> {
             forced_session = desired_forced;
         }
 
-        // Keep tmux listening for the mouse in whatever session we're mirroring,
-        // so passthrough has something to land on, and put the user's setting
-        // back when we stop. Unlike window-size this isn't scoped to the Preview
-        // panel: the preview forwards mouse under tree focus too, and a drag
-        // that silently selects nothing is the worse surprise.
-        let desired_mouse =
+        // Pin the options the mirror needs in whatever session we're showing, and
+        // put the user's settings back when we stop. Unlike window-size this
+        // isn't scoped to the Preview panel: the preview forwards mouse under
+        // tree focus too, and a drag that silently selects nothing is the worse
+        // surprise.
+        let desired_mirror =
             active_terminal.as_ref().and_then(|t| session_id_of(state, &t.target_id));
-        if desired_mouse != pinned_mouse {
-            if pinned_mouse.is_some() {
-                restore_pinned_mouse().await;
+        if desired_mirror != pinned_session {
+            if pinned_session.is_some() {
+                restore_pinned_options().await;
             }
-            if let Some(sess) = &desired_mouse {
-                pin_mouse_on(sess).await;
+            if let Some(sess) = &desired_mirror {
+                pin_mirror_options(sess).await;
             }
-            pinned_mouse = desired_mouse;
+            pinned_session = desired_mirror;
         }
 
         terminal.draw(|f| {
@@ -1468,7 +1539,7 @@ async fn run_app(state: &mut AppState) -> Result<()> {
                             // This path exits the process outright, so put the
                             // session options back before it does.
                             restore_forced_window_size().await;
-                            restore_pinned_mouse().await;
+                            restore_pinned_options().await;
                             disable_raw_mode()?;
                             execute!(
                                 io::stdout(),
@@ -1482,7 +1553,7 @@ async fn run_app(state: &mut AppState) -> Result<()> {
                         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             state.save_to_disk();
                             restore_forced_window_size().await;
-                            restore_pinned_mouse().await;
+                            restore_pinned_options().await;
                             disable_raw_mode()?;
                             execute!(
                                 io::stdout(),
@@ -1565,16 +1636,16 @@ async fn run_app(state: &mut AppState) -> Result<()> {
                         {
                             state.focus.panel = Panel::Tree;
                         } else if let Some(term) = &active_terminal {
-                            // Forward the swallowed Ctrl+B and then this key
-                            let mut bytes = vec![0x02u8];
+                            // Forward the swallowed prefix and then this key. Pressing
+                            // the prefix twice lands here too, which is what
+                            // sends one prefix through to a nested tmux or ttree.
+                            let mut bytes = vec![prefix.byte];
                             encode_key(&key, &mut bytes);
                             if !bytes.is_empty() {
                                 let _ = term.pty_writer.send(bytes);
                             }
                         }
-                    } else if key.code == KeyCode::Char('b')
-                        && key.modifiers.contains(KeyModifiers::CONTROL)
-                    {
+                    } else if prefix.matches(&key) {
                         prefix_pending = true;
                     } else if let Some(term) = &active_terminal {
                         let mut bytes = Vec::new();
@@ -1590,7 +1661,7 @@ async fn run_app(state: &mut AppState) -> Result<()> {
 
     // Put back the tmux options we pinned for previewing.
     restore_forced_window_size().await;
-    restore_pinned_mouse().await;
+    restore_pinned_options().await;
 
     if let Some(term) = active_terminal.take() {
         if let Some(pid) = term.pty_pid {
@@ -1776,5 +1847,34 @@ mod tests {
         // Arrows go plain unmodified, and CSI 1;<mod> when modified.
         assert_eq!(key_bytes(KeyCode::Up, KeyModifiers::NONE), b"\x1b[A");
         assert_eq!(key_bytes(KeyCode::Up, KeyModifiers::CONTROL), b"\x1b[1;5A");
+    }
+}
+
+#[cfg(test)]
+mod prefix_tests {
+    use super::*;
+    use crossterm::event::KeyEvent;
+
+    #[test]
+    fn prefix_follows_the_tmux_option() {
+        assert_eq!(Prefix::parse(Some("C-a".into())), Prefix { ch: 'a', byte: 0x01 });
+        assert_eq!(Prefix::parse(Some("C-b".into())), Prefix { ch: 'b', byte: 0x02 });
+        assert_eq!(Prefix::parse(Some(" C-z \n".into())), Prefix { ch: 'z', byte: 0x1a });
+    }
+
+    #[test]
+    fn unparseable_prefixes_fall_back_to_c_b() {
+        // Better a working default than a ttree with no prefix at all.
+        for value in [None, Some("None".into()), Some("M-a".into()), Some("C-Space".into())] {
+            assert_eq!(Prefix::parse(value), Prefix::default());
+        }
+    }
+
+    #[test]
+    fn prefix_matches_only_with_control() {
+        let p = Prefix::parse(Some("C-a".into()));
+        assert!(p.matches(&KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL)));
+        assert!(!p.matches(&KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE)));
+        assert!(!p.matches(&KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL)));
     }
 }
