@@ -1,8 +1,16 @@
 [package]
 name = "ttree"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2021"
 license = "MIT"
+description = "A tmux session manager TUI: tree navigation with a live embedded pane preview."
+repository = "https://gitlab.com/tek.cat/ttree"
+homepage = "https://ttree.tek.cat"
+documentation = "https://gitlab.com/tek.cat/ttree/-/blob/main/README.md"
+readme = "README.md"
+keywords = ["tmux", "tui", "terminal", "ratatui", "session-manager"]
+categories = ["command-line-utilities"]
+exclude = ["demo/", "docs/", "public/", "scripts/", ".gitlab-ci.yml"]
 
 [dependencies]
 ratatui        = "0.30.0"
