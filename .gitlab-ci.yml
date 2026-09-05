@@ -49,7 +49,9 @@ test:fmt:
   stage: test
   image: rust:1.94
   rules:
-    - if: '$CI_COMMIT_BRANCH == "main"'
+    # Every branch, not just main: a dev branch nobody lints is a dev
+    # branch that fails the moment it is merged.
+    - if: '$CI_COMMIT_BRANCH'
     - if: '$CI_COMMIT_TAG'
   script:
     - rustup component add rustfmt
@@ -60,7 +62,9 @@ test:clippy:
   image: rust:1.94
   cache: *cargo_cache
   rules:
-    - if: '$CI_COMMIT_BRANCH == "main"'
+    # Every branch, not just main: a dev branch nobody lints is a dev
+    # branch that fails the moment it is merged.
+    - if: '$CI_COMMIT_BRANCH'
     - if: '$CI_COMMIT_TAG'
   script:
     - rustup component add clippy
@@ -71,7 +75,9 @@ test:cargo:
   image: rust:1.94
   cache: *cargo_cache
   rules:
-    - if: '$CI_COMMIT_BRANCH == "main"'
+    # Every branch, not just main: a dev branch nobody lints is a dev
+    # branch that fails the moment it is merged.
+    - if: '$CI_COMMIT_BRANCH'
     - if: '$CI_COMMIT_TAG'
   script:
     - cargo test --locked
