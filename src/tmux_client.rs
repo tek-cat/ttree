@@ -49,6 +49,25 @@ impl Tmux {
         None
     }
 
+    /// The session a pane belongs to, used to recognise the session ttree is
+    /// itself running in. `None` if tmux can't resolve the pane.
+    pub async fn session_of_pane(pane_id: &str) -> Option<String> {
+        let output = Command::new("tmux")
+            .args(["display-message", "-p", "-t", pane_id, "#{session_id}"])
+            .output()
+            .await
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let val = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if val.is_empty() {
+            None
+        } else {
+            Some(val)
+        }
+    }
+
     #[allow(dead_code)]
     pub async fn capture_pane(pane_id: &str) -> Result<String> {
         let output =

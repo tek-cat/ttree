@@ -36,13 +36,8 @@ fn setup_panic_hook() {
             DisableMouseCapture,
             DisableBracketedPaste
         );
-        // Don't leave a previewed session's window-size pinned if we crash.
-        if let Some((session, prior)) = FORCED_WINDOW_SIZE.lock().ok().and_then(|mut g| g.take()) {
-            restore_window_size_blocking(&session, &prior);
-        }
-        if let Some((session, prior)) = PINNED_MOUSE.lock().ok().and_then(|mut g| g.take()) {
-            restore_mouse_blocking(&session, &prior);
-        }
+        // Don't leave a previewed session's options pinned if we crash.
+        restore_pins_blocking();
         default_hook(panic_info);
     }));
 }
@@ -379,6 +374,12 @@ impl Osc52Relay {
     const MAX_PAYLOAD: usize = 1 << 20;
 
     fn feed(&mut self, data: &[u8]) {
+        self.scan(data, &mut |payload| Self::emit(payload));
+    }
+
+    /// The scanner proper. Split from [`Osc52Relay::feed`] so tests can collect
+    /// the sequences instead of writing them at a terminal.
+    fn scan(&mut self, data: &[u8], out: &mut impl FnMut(&[u8])) {
         for &b in data {
             match &mut self.payload {
                 None => {
@@ -399,7 +400,7 @@ impl Osc52Relay {
                         if b == b'\\' {
                             let done = std::mem::take(payload);
                             self.payload = None;
-                            Self::emit(&done);
+                            out(&done);
                             continue;
                         }
                         payload.push(0x1b);
@@ -408,7 +409,7 @@ impl Osc52Relay {
                         0x07 => {
                             let done = std::mem::take(payload);
                             self.payload = None;
-                            Self::emit(&done);
+                            out(&done);
                         }
                         0x1b => self.esc_pending = true,
                         _ => {
@@ -742,6 +743,50 @@ async fn restore_pinned_mouse() {
     }
 }
 
+/// Put every pinned tmux option back, synchronously. Shared by the panic hook
+/// and the signal handler, both of which run outside the async restore paths.
+fn restore_pins_blocking() {
+    if let Some((session, prior)) = FORCED_WINDOW_SIZE.lock().ok().and_then(|mut g| g.take()) {
+        restore_window_size_blocking(&session, &prior);
+    }
+    if let Some((session, prior)) = PINNED_MOUSE.lock().ok().and_then(|mut g| g.take()) {
+        restore_mouse_blocking(&session, &prior);
+    }
+}
+
+/// Unpin and leave cleanly when we're killed rather than quit. Closing the
+/// terminal window or a plain `kill` would otherwise strand the user's session
+/// with `window-size smallest` and the mouse forced on, since the restores at
+/// the quit keys and the end of `run_app` never get to run.
+fn spawn_signal_restore() {
+    use tokio::signal::unix::{signal, SignalKind};
+    tokio::spawn(async move {
+        let (mut term, mut hup, mut int) = match (
+            signal(SignalKind::terminate()),
+            signal(SignalKind::hangup()),
+            signal(SignalKind::interrupt()),
+        ) {
+            (Ok(t), Ok(h), Ok(i)) => (t, h, i),
+            _ => return,
+        };
+        let code = tokio::select! {
+            _ = term.recv() => 143,
+            _ = hup.recv() => 129,
+            _ = int.recv() => 130,
+        };
+        restore_pins_blocking();
+        let _ = disable_raw_mode();
+        let _ = execute!(
+            io::stdout(),
+            PopKeyboardEnhancementFlags,
+            LeaveAlternateScreen,
+            DisableMouseCapture,
+            DisableBracketedPaste
+        );
+        std::process::exit(code);
+    });
+}
+
 /// Force a full redraw of our embedded preview client (found by its child pid).
 /// tmux's incremental repaint can leave stale cells (old scrollback, a curses
 /// dialog, fragments from a size change) in our vt100 mirror; a forced refresh
@@ -800,11 +845,18 @@ async fn run_app(state: &mut AppState) -> Result<()> {
     let mut last_sync_update = tokio::time::Instant::now();
     let action_attach: Option<String>;
 
+    spawn_signal_restore();
+
     // If we're inside tmux, we want to start by focusing the active pane.
     // Otherwise, we prefer to keep our previous selection (e.g. after a detach)
     if std::env::var("TMUX").is_ok() {
         state.focus.selected_id = None;
     }
+    // Learn which session we're running in, if any, so we never mirror it.
+    state.own_session = match std::env::var("TMUX_PANE") {
+        Ok(pane) if !pane.is_empty() => Tmux::session_of_pane(&pane).await,
+        _ => None,
+    };
     let _ = sync_state(state).await;
 
     let mut last_terminal_size = terminal.size().unwrap_or(ratatui::layout::Size::new(80, 24));
@@ -944,10 +996,32 @@ async fn run_app(state: &mut AppState) -> Result<()> {
             last_sidebar_cols = state.sidebar_cols;
         }
 
+        // Never mirror the session ttree is running in. The embedded client
+        // would attach to the very window we're drawing, so the preview fills
+        // with ttree drawing ttree drawing ttree, and the nested clients fight
+        // over the window size.
+        state.mirror_suppressed = match (&state.own_session, state.focus.selected_id.as_deref()) {
+            (Some(own), Some(id)) => session_id_of(state, id).as_deref() == Some(own.as_str()),
+            _ => false,
+        };
+
         if state.focus.selected_id != last_selected_id {
             state.focus.enable_scrolling = true;
 
-            if let Some(target_id) = &state.focus.selected_id {
+            if state.mirror_suppressed {
+                if let Some(term) = active_terminal.take() {
+                    if let Some(pid) = term.pty_pid {
+                        let _ = tokio::process::Command::new("kill")
+                            .arg(pid.to_string())
+                            .output()
+                            .await;
+                    }
+                }
+                if let Some(task) = pty_task.take() {
+                    task.abort();
+                }
+                state.focus.panel = Panel::Tree;
+            } else if let Some(target_id) = &state.focus.selected_id {
                 if let Some(term) = &mut active_terminal {
                     let target_id_clone = target_id.clone();
                     term.target_id = target_id.clone();
@@ -1521,4 +1595,153 @@ async fn run_app(state: &mut AppState) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::{KeyEvent, MouseEvent};
+
+    fn mouse(kind: MouseEventKind, column: u16, row: u16, modifiers: KeyModifiers) -> MouseEvent {
+        MouseEvent { kind, column, row, modifiers }
+    }
+
+    fn encoded(kind: MouseEventKind, column: u16, row: u16, x_offset: u16) -> String {
+        let ev = mouse(kind, column, row, KeyModifiers::NONE);
+        String::from_utf8(encode_mouse(&ev, x_offset, 0).expect("encodable")).unwrap()
+    }
+
+    #[test]
+    fn mouse_encodes_sgr_with_one_based_coordinates() {
+        // Column 0 of the preview is column 1 to the embedded client.
+        assert_eq!(encoded(MouseEventKind::Down(MouseButton::Left), 14, 0, 14), "\x1b[<0;1;1M");
+        assert_eq!(encoded(MouseEventKind::Down(MouseButton::Right), 20, 4, 14), "\x1b[<2;7;5M");
+    }
+
+    #[test]
+    fn mouse_release_uses_lowercase_terminator() {
+        assert_eq!(encoded(MouseEventKind::Up(MouseButton::Left), 15, 2, 14), "\x1b[<0;2;3m");
+    }
+
+    #[test]
+    fn mouse_drag_and_wheel_use_their_own_button_codes() {
+        assert_eq!(encoded(MouseEventKind::Drag(MouseButton::Left), 15, 0, 14), "\x1b[<32;2;1M");
+        assert_eq!(encoded(MouseEventKind::ScrollUp, 15, 0, 14), "\x1b[<64;2;1M");
+        assert_eq!(encoded(MouseEventKind::ScrollDown, 15, 0, 14), "\x1b[<65;2;1M");
+    }
+
+    #[test]
+    fn mouse_modifiers_add_their_bits() {
+        let shift_alt_ctrl = KeyModifiers::SHIFT | KeyModifiers::ALT | KeyModifiers::CONTROL;
+        let ev = mouse(MouseEventKind::Down(MouseButton::Left), 14, 0, shift_alt_ctrl);
+        let out = String::from_utf8(encode_mouse(&ev, 14, 0).unwrap()).unwrap();
+        assert_eq!(out, "\x1b[<28;1;1M"); // 0 + 4 + 8 + 16
+    }
+
+    #[test]
+    fn forwarding_follows_the_mode_the_client_asked_for() {
+        use vt100::MouseProtocolMode as M;
+        let down = MouseEventKind::Down(MouseButton::Left);
+        let drag = MouseEventKind::Drag(MouseButton::Left);
+
+        // Asked for nothing: send nothing.
+        assert!(!should_forward_mouse(&down, M::None));
+        assert!(!should_forward_mouse(&MouseEventKind::ScrollUp, M::None));
+
+        // Buttons and wheel, but not drag.
+        assert!(should_forward_mouse(&down, M::Press));
+        assert!(should_forward_mouse(&MouseEventKind::ScrollUp, M::PressRelease));
+        assert!(!should_forward_mouse(&drag, M::Press));
+        assert!(!should_forward_mouse(&drag, M::PressRelease));
+
+        // Drag once motion is wanted.
+        assert!(should_forward_mouse(&drag, M::ButtonMotion));
+        assert!(should_forward_mouse(&drag, M::AnyMotion));
+    }
+
+    #[test]
+    fn bare_hover_is_never_forwarded() {
+        // Even under AnyMotion: tmux advertises it whenever `mouse on`,
+        // regardless of what the app in the pane actually wants.
+        use vt100::MouseProtocolMode as M;
+        for mode in [M::None, M::Press, M::PressRelease, M::ButtonMotion, M::AnyMotion] {
+            assert!(!should_forward_mouse(&MouseEventKind::Moved, mode));
+        }
+    }
+
+    fn relayed(chunks: &[&[u8]]) -> Vec<Vec<u8>> {
+        let mut relay = Osc52Relay::default();
+        let mut out = Vec::new();
+        for chunk in chunks {
+            relay.scan(chunk, &mut |payload| out.push(payload.to_vec()));
+        }
+        out
+    }
+
+    #[test]
+    fn osc52_relays_a_bel_terminated_sequence() {
+        assert_eq!(relayed(&[b"junk\x1b]52;c;aGk=\x07more"]), vec![b"c;aGk=".to_vec()]);
+    }
+
+    #[test]
+    fn osc52_relays_an_st_terminated_sequence() {
+        assert_eq!(relayed(&[b"\x1b]52;c;YWJj\x1b\\rest"]), vec![b"c;YWJj".to_vec()]);
+    }
+
+    #[test]
+    fn osc52_survives_every_split_point() {
+        // The PTY hands us 4 KiB at a time, so a sequence can be cut anywhere.
+        let data = b"pre\x1b]52;c;YWJj\x1b\\post";
+        for split in 1..data.len() {
+            assert_eq!(
+                relayed(&[&data[..split], &data[split..]]),
+                vec![b"c;YWJj".to_vec()],
+                "split at {}",
+                split
+            );
+        }
+    }
+
+    #[test]
+    fn osc52_ignores_other_sequences() {
+        assert!(relayed(&[b"\x1b]0;title\x07\x1b]52\x07\x1b[<0;5;5M"]).is_empty());
+    }
+
+    #[test]
+    fn osc52_restarts_the_introducer_on_a_repeated_escape() {
+        assert_eq!(relayed(&[b"\x1b\x1b]52;c;YQ==\x07"]), vec![b"c;YQ==".to_vec()]);
+    }
+
+    #[test]
+    fn osc52_keeps_an_escape_that_is_not_a_terminator() {
+        assert_eq!(relayed(&[b"\x1b]52;c;a\x1bb\x07"]), vec![b"c;a\x1bb".to_vec()]);
+    }
+
+    #[test]
+    fn osc52_drops_an_oversized_payload_and_recovers() {
+        let mut relay = Osc52Relay::default();
+        let mut out: Vec<Vec<u8>> = Vec::new();
+        relay.scan(b"\x1b]52;", &mut |p| out.push(p.to_vec()));
+        relay.scan(&vec![b'A'; Osc52Relay::MAX_PAYLOAD + 1], &mut |p| out.push(p.to_vec()));
+        assert!(out.is_empty(), "runaway payload should be dropped");
+        relay.scan(b"\x1b]52;c;YQ==\x07", &mut |p| out.push(p.to_vec()));
+        assert_eq!(out, vec![b"c;YQ==".to_vec()]);
+    }
+
+    fn key_bytes(code: KeyCode, modifiers: KeyModifiers) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        encode_key(&KeyEvent::new(code, modifiers), &mut bytes);
+        bytes
+    }
+
+    #[test]
+    fn keys_encode_plain_and_modified_forms() {
+        assert_eq!(key_bytes(KeyCode::Char('a'), KeyModifiers::NONE), b"a");
+        assert_eq!(key_bytes(KeyCode::Char('c'), KeyModifiers::CONTROL), vec![0x03]);
+        assert_eq!(key_bytes(KeyCode::Enter, KeyModifiers::NONE), b"\r");
+        assert_eq!(key_bytes(KeyCode::Tab, KeyModifiers::SHIFT), b"\x1b[Z");
+        // Arrows go plain unmodified, and CSI 1;<mod> when modified.
+        assert_eq!(key_bytes(KeyCode::Up, KeyModifiers::NONE), b"\x1b[A");
+        assert_eq!(key_bytes(KeyCode::Up, KeyModifiers::CONTROL), b"\x1b[1;5A");
+    }
 }

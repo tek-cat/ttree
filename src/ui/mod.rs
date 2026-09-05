@@ -76,6 +76,14 @@ pub fn render(
             let pseudo_term = tui_term::widget::PseudoTerminal::new(parser.screen());
             frame.render_widget(pseudo_term, preview_area);
         }
+    } else if state.mirror_suppressed {
+        // Say why the preview is empty. Mirroring our own session would draw
+        // ttree inside ttree, so we decline rather than render a hall of mirrors.
+        let note = Paragraph::new("ttree is running in this session, so it isn't mirrored here.")
+            .style(Style::default().fg(Color::DarkGray))
+            .alignment(Alignment::Center);
+        let y = preview_area.y + preview_area.height / 2;
+        frame.render_widget(note, Rect::new(preview_area.x, y, preview_area.width, 1));
     }
 
     // Command Bar - contextual based on panel mode

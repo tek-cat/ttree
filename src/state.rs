@@ -21,6 +21,12 @@ pub struct AppState {
     /// Colors adopted from the user's tmux status bar at startup. Not persisted;
     /// re-read from the live tmux server each launch.
     pub theme: crate::theme::Theme,
+    /// The session ttree itself is running in, when launched from inside tmux.
+    /// We refuse to mirror it (see [`AppState::mirror_suppressed`]).
+    pub own_session: Option<SessionId>,
+    /// Set when the selection lands in our own session, so the preview can say
+    /// why it is empty instead of just going blank.
+    pub mirror_suppressed: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -44,6 +50,8 @@ impl Default for AppState {
             last_target_id: None,
             sidebar_cols: 0,
             theme: crate::theme::Theme::default(),
+            own_session: None,
+            mirror_suppressed: false,
         }
     }
 }
@@ -420,4 +428,128 @@ pub enum Panel {
     #[default]
     Tree,
     Preview,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn session(id: &str, windows: &[&str], expanded: bool) -> Session {
+        Session {
+            id: id.into(),
+            name: id.trim_start_matches('$').into(),
+            windows: windows.iter().map(|w| w.to_string()).collect(),
+            expanded,
+            last_attached: 0,
+            attached: false,
+        }
+    }
+
+    fn window(id: &str, session_id: &str, panes: &[&str], expanded: bool) -> Window {
+        Window {
+            id: id.into(),
+            session_id: session_id.into(),
+            name: "win".into(),
+            panes: panes.iter().map(|p| p.to_string()).collect(),
+            active: true,
+            width: 80,
+            height: 24,
+            expanded,
+        }
+    }
+
+    fn pane(id: &str, window_id: &str) -> Pane {
+        Pane {
+            id: id.into(),
+            window_id: window_id.into(),
+            title: "sh".into(),
+            current_command: "sh".into(),
+            active: true,
+            region: None,
+        }
+    }
+
+    /// Build a state from (session, windows, panes-per-window) descriptions.
+    fn state_with(spec: &[(&str, bool, &[(&str, bool, &[&str])])]) -> AppState {
+        let mut st = AppState::default();
+        for (sid, sexp, windows) in spec {
+            let wids: Vec<&str> = windows.iter().map(|(wid, _, _)| *wid).collect();
+            st.sessions.insert(sid.to_string(), session(sid, &wids, *sexp));
+            for (wid, wexp, panes) in *windows {
+                st.windows.insert(wid.to_string(), window(wid, sid, panes, *wexp));
+                for pid in *panes {
+                    st.panes.insert(pid.to_string(), pane(pid, wid));
+                }
+            }
+        }
+        st
+    }
+
+    #[test]
+    fn a_lone_pane_collapses_to_just_that_pane() {
+        // One window, one pane: no hierarchy is worth showing, so the row *is*
+        // the pane and the session header is skipped entirely.
+        let st = state_with(&[("$0", true, &[("@0", true, &["%0"])])]);
+        assert_eq!(st.get_dynamic_visible_items(), vec!["%0"]);
+    }
+
+    #[test]
+    fn a_single_window_session_skips_the_window_row() {
+        let st = state_with(&[("$0", true, &[("@0", true, &["%0", "%1"])])]);
+        assert_eq!(st.get_dynamic_visible_items(), vec!["$0", "%0", "%1"]);
+    }
+
+    #[test]
+    fn collapsing_a_session_hides_its_panes() {
+        let st = state_with(&[("$0", false, &[("@0", true, &["%0", "%1"])])]);
+        assert_eq!(st.get_dynamic_visible_items(), vec!["$0"]);
+    }
+
+    #[test]
+    fn multi_window_sessions_show_the_full_hierarchy() {
+        let st = state_with(&[("$0", true, &[("@0", true, &["%0", "%1"]), ("@1", true, &["%2"])])]);
+        // @0 has two panes so it gets a header row; @1 has one, so its row is
+        // the pane itself.
+        assert_eq!(st.get_dynamic_visible_items(), vec!["$0", "@0", "%0", "%1", "%2"]);
+    }
+
+    #[test]
+    fn collapsing_a_window_hides_only_its_own_panes() {
+        let st =
+            state_with(&[("$0", true, &[("@0", false, &["%0", "%1"]), ("@1", true, &["%2"])])]);
+        assert_eq!(st.get_dynamic_visible_items(), vec!["$0", "@0", "%2"]);
+    }
+
+    #[test]
+    fn selection_wraps_at_both_ends() {
+        let mut st = state_with(&[("$0", true, &[("@0", true, &["%0", "%1"])])]);
+        st.focus.selected_id = Some("%1".into()); // last row
+
+        st.move_selection_down();
+        assert_eq!(st.focus.selected_id.as_deref(), Some("$0"), "past the end wraps to the top");
+
+        st.move_selection_up();
+        assert_eq!(st.focus.selected_id.as_deref(), Some("%1"), "before the top wraps to the end");
+    }
+
+    #[test]
+    fn a_selection_that_left_the_list_falls_back_to_an_end() {
+        // e.g. the selected pane closed between syncs.
+        let mut st = state_with(&[("$0", true, &[("@0", true, &["%0", "%1"])])]);
+        st.focus.selected_id = Some("%99".into());
+        st.move_selection_down();
+        assert_eq!(st.focus.selected_id.as_deref(), Some("$0"));
+
+        st.focus.selected_id = Some("%99".into());
+        st.move_selection_up();
+        assert_eq!(st.focus.selected_id.as_deref(), Some("%1"));
+    }
+
+    #[test]
+    fn selection_moves_are_safe_with_no_sessions() {
+        let mut st = AppState::default();
+        st.move_selection_down();
+        st.move_selection_up();
+        assert_eq!(st.focus.selected_id, None);
+    }
 }
