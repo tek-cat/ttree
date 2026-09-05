@@ -17,9 +17,13 @@ Built to solve a specific problem: driving many concurrent AI agent sessions run
 - Full mouse support: click to select, drag the separator to resize, scroll to navigate
 - Mouse in the preview is passed straight through to tmux, so clicking a pane, dragging to select and scrolling the scrollback behave exactly as they do in your own tmux. ttree turns tmux's `mouse` option on for the session it is mirroring and puts your previous setting back when it stops
 - Copies made in the preview are relayed onward as OSC 52, which works over SSH and through tmux
+- Activity markers: sessions and windows that produced output in the last few seconds carry a dot, so you can see which pane is working without opening it
+- Fuzzy filter (`/`) over the whole tree, keeping the parents of anything that matches so the tree stays a tree
+- Manage tmux without leaving the TUI: create sessions and windows, split panes, rename, and kill anything (kills ask first and name what they will destroy)
 - Vim-style navigation: `j` / `k` / `h` / `l`
-- Create and rename sessions without leaving the TUI
-- Real-time sync with tmux every 200ms
+- The preview is mirrored through a session grouped with the target, so browsing the tree never moves the window your other terminals are looking at
+- Works on any tmux socket, including `tmux -L name` and `tmux -S /path`
+- Real-time sync with tmux every 200ms, in a single tmux invocation per tick
 
 ## Stack
 
@@ -87,12 +91,20 @@ Run `ttree` from any terminal, inside or outside tmux.
 | `Enter` | Open live preview panel |
 | `a` | Attach to selected session/window/pane |
 | `n` | Create new session |
-| `r` | Rename selected session |
+| `c` | Create window in the selected session |
+| `%` / `"` | Split the selected pane right / below |
+| `r` | Rename the selected session, or window |
+| `x` | Kill the selected session, window or pane (asks first) |
+| `/` | Filter the tree; `Esc` clears it |
 | `Ctrl+P` | Toggle focus between tree and preview |
 | `?` | Help |
 | `q` / `Ctrl+C` | Quit |
 
-In preview mode, `Ctrl+B` acts as the tmux prefix (e.g. `Ctrl+B d` to detach and return to the tree).
+In preview mode your tmux prefix (`Ctrl+B` unless you have changed it, ttree reads the `prefix` option) is reserved: `prefix d` returns to the tree, `prefix <key>` sends the prefix and key on to tmux, and pressing the prefix twice sends one copy through, which is how you reach a tmux or a ttree nested further in.
+
+### tmux options ttree changes
+
+While it is mirroring a session, ttree sets `mouse on` and `set-clipboard on` on that session, and puts your previous values back when it stops (including if it is killed). The first makes mouse passthrough do anything at all; the second is what lets a copy made in the preview reach your system clipboard, since tmux drops a relayed OSC 52 at its default `external`.
 
 ## Background
 
