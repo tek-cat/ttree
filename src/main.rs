@@ -743,6 +743,30 @@ async fn restore_pinned_mouse() {
     }
 }
 
+/// The tmux socket ttree was launched against, read from `$TMUX` (the socket
+/// path is its first comma-separated field).
+///
+/// We clear `TMUX` when spawning the embedded client so tmux doesn't refuse to
+/// nest, but clearing it also throws away which server we belong to, so on a
+/// `tmux -L work` or `tmux -S /path` server every preview quietly attached to
+/// the default socket instead: the sidebar listed the right sessions while the
+/// preview stayed blank forever. Passing `-S <path>` back puts the client on
+/// the server we're actually browsing.
+fn tmux_socket() -> Option<&'static str> {
+    static TMUX_SOCKET: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    TMUX_SOCKET
+        .get_or_init(|| {
+            let value = std::env::var("TMUX").ok()?;
+            let path = value.split(',').next().unwrap_or_default().trim();
+            if path.is_empty() {
+                None
+            } else {
+                Some(path.to_string())
+            }
+        })
+        .as_deref()
+}
+
 /// Put every pinned tmux option back, synchronously. Shared by the panic hook
 /// and the signal handler, both of which run outside the async restore paths.
 fn restore_pins_blocking() {
@@ -1080,9 +1104,14 @@ async fn run_app(state: &mut AppState) -> Result<()> {
                         pixel_height: 0,
                     }) {
                         let mut cmd = CommandBuilder::new("tmux");
-                        // Unset TMUX to prevent nesting issues in the preview
+                        // Unset TMUX to prevent nesting issues in the preview,
+                        // then name the socket explicitly since unsetting it is
+                        // what loses the server (see `tmux_socket`).
                         cmd.env("TMUX", "");
                         cmd.env("TMUX_PANE", "");
+                        if let Some(socket) = tmux_socket() {
+                            cmd.args(["-S", socket]);
+                        }
                         let target_id_clone = target_id.clone();
                         cmd.args(["attach-session", "-t", &target_id_clone]);
 
@@ -1588,7 +1617,11 @@ async fn run_app(state: &mut AppState) -> Result<()> {
         if std::env::var("TMUX").is_ok() {
             cmd.args(["switch-client", "-t", &target]);
         } else {
-            cmd.env_remove("TMUX").env_remove("TMUX_PANE").args(["attach-session", "-t", &target]);
+            cmd.env_remove("TMUX").env_remove("TMUX_PANE");
+            if let Some(socket) = tmux_socket() {
+                cmd.args(["-S", socket]);
+            }
+            cmd.args(["attach-session", "-t", &target]);
         }
         let mut child = cmd.spawn()?;
         let _ = child.wait().await;
