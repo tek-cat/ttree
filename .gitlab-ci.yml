@@ -1,11 +1,17 @@
 # CI overview (stages run in order; a stage only starts if the previous passed)
-#   test    - test:fmt    : cargo fmt --check (formatting gate)
-#           - test:clippy : cargo clippy -D warnings (lint gate)
-#           - test:cargo  : cargo test (compiles + runs the unit tests)
-#   build   - build:linux   : native x86_64-unknown-linux-gnu (glibc) release binary
-#           - build:android : aarch64-linux-android (Bionic PIE) release binary for Termux
-#   deploy  - pages          : publish the static landing site (main only)
-#           - release        : on a version tag, publish both binaries as a GitLab Release
+#   test    - test:fmt         : cargo fmt --check (formatting gate)
+#           - test:clippy      : cargo clippy -D warnings (lint gate)
+#           - test:cargo       : cargo test (compiles + runs the unit tests)
+#   build   - build:linux      : native x86_64-unknown-linux-gnu (glibc) release binary
+#           - build:musl       : x86_64-unknown-linux-musl, statically linked, runs on any distro
+#           - build:linux-arm64: aarch64-unknown-linux-gnu, cross-compiled release binary
+#           - build:android    : aarch64-linux-android (Bionic PIE) release binary for Termux
+#   deploy  - pages            : publish the static landing site (main only)
+#           - release          : on a version tag, publish all binaries as a GitLab Release
+#
+# macOS is not built here: GitLab's shared runners do not offer macOS to free-tier
+# projects. Shipping a macOS binary would need either a self-hosted macOS runner or a
+# separate GitHub Actions workflow, neither of which is set up yet.
 #
 # The android build needs no special dependency handling: portable-pty 0.9 uses
 # serial2, which compiles for aarch64-linux-android out of the box (see
@@ -94,6 +100,69 @@ build:linux:
       - target/release/ttree
     expire_in: 30 days
 
+build:musl:
+  stage: build
+  image: rust:1.94
+  cache: *cargo_cache
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+    - if: '$CI_COMMIT_TAG'
+  before_script:
+    - apt-get update && apt-get install -y musl-tools
+    - rustup target add x86_64-unknown-linux-musl
+  script:
+    - cargo build --release --locked --target x86_64-unknown-linux-musl
+    - strip target/x86_64-unknown-linux-musl/release/ttree
+    - |
+      if [ -n "$CI_COMMIT_TAG" ]; then
+        echo "Uploading ttree-x86_64-linux-musl to the package registry for $CI_COMMIT_TAG"
+        curl --fail --silent --show-error \
+          --header "JOB-TOKEN: $CI_JOB_TOKEN" \
+          --upload-file target/x86_64-unknown-linux-musl/release/ttree \
+          "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/ttree/${CI_COMMIT_TAG}/ttree-x86_64-linux-musl"
+      fi
+  artifacts:
+    name: "ttree-x86_64-linux-musl"
+    paths:
+      - target/x86_64-unknown-linux-musl/release/ttree
+    expire_in: 30 days
+
+build:linux-arm64:
+  stage: build
+  image: rust:1.94
+  cache: *cargo_cache
+  variables:
+    CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+    - if: '$CI_COMMIT_TAG'
+  before_script:
+    - apt-get update && apt-get install -y gcc-aarch64-linux-gnu
+    - rustup target add aarch64-unknown-linux-gnu
+  script:
+    - cargo build --release --locked --target aarch64-unknown-linux-gnu
+    # Stripping is a size optimisation, so never fail a release build over it
+    # if the cross binutils are packaged differently than expected.
+    - aarch64-linux-gnu-strip target/aarch64-unknown-linux-gnu/release/ttree || true
+    - |
+      if [ -n "$CI_COMMIT_TAG" ]; then
+        echo "Uploading ttree-aarch64-linux-gnu to the package registry for $CI_COMMIT_TAG"
+        curl --fail --silent --show-error \
+          --header "JOB-TOKEN: $CI_JOB_TOKEN" \
+          --upload-file target/aarch64-unknown-linux-gnu/release/ttree \
+          "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/ttree/${CI_COMMIT_TAG}/ttree-aarch64-linux-gnu"
+      fi
+  artifacts:
+    name: "ttree-aarch64-linux-gnu"
+    paths:
+      - target/aarch64-unknown-linux-gnu/release/ttree
+    expire_in: 30 days
+
+# macOS: intentionally no build job here. GitLab shared runners do not provide
+# macOS to free-tier projects, and a job that cannot run is worse than none.
+# A real macOS binary needs either a self-hosted macOS runner or a separate
+# GitHub Actions workflow.
+
 build:android:
   stage: build
   image: rust:1.94
@@ -160,6 +229,10 @@ release:
   needs:
     - job: build:linux
       artifacts: false
+    - job: build:musl
+      artifacts: false
+    - job: build:linux-arm64
+      artifacts: false
     - job: build:android
       artifacts: false
   script:
@@ -173,6 +246,14 @@ release:
         - name: 'ttree-x86_64-linux-gnu (glibc)'
           url: '${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/ttree/${CI_COMMIT_TAG}/ttree-x86_64-linux-gnu'
           filepath: '/ttree-x86_64-linux-gnu'
+          link_type: 'package'
+        - name: 'ttree-x86_64-linux-musl (static)'
+          url: '${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/ttree/${CI_COMMIT_TAG}/ttree-x86_64-linux-musl'
+          filepath: '/ttree-x86_64-linux-musl'
+          link_type: 'package'
+        - name: 'ttree-aarch64-linux-gnu (arm64)'
+          url: '${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/ttree/${CI_COMMIT_TAG}/ttree-aarch64-linux-gnu'
+          filepath: '/ttree-aarch64-linux-gnu'
           link_type: 'package'
         - name: 'ttree-aarch64-linux-android (Termux)'
           url: '${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/ttree/${CI_COMMIT_TAG}/ttree-aarch64-linux-android'
