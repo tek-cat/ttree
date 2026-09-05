@@ -71,6 +71,12 @@ async fn sync_state(state: &mut AppState) -> Result<bool> {
         let parts: Vec<&str> = s.split('\u{001f}').collect();
         if parts.len() >= 4 {
             let id = parts[0].to_string();
+            // Our own grouped mirror sessions are an implementation detail of
+            // the preview, not something the user should have to look at or
+            // navigate into.
+            if parts[1].starts_with(MIRROR_SESSION_PREFIX) {
+                continue;
+            }
             let expanded = if is_initial_load && state.expanded_ids.is_empty() {
                 true // Default to expanded on very first run
             } else {
@@ -96,6 +102,17 @@ async fn sync_state(state: &mut AppState) -> Result<bool> {
         if parts.len() >= 6 {
             let id = parts[0].to_string();
             let session_id = parts[1].to_string();
+
+            // A grouped session shares its windows, so `list-windows -a` returns
+            // each of ours twice: once under the real session and once under our
+            // mirror. Keeping the mirror's copy would overwrite the window's real
+            // owner, and every lookup from a pane back to its session would then
+            // answer with the mirror, which reads as the client having drifted
+            // and rebuilds the mirror on every sync. Sessions are parsed first,
+            // so anything whose session we dropped gets dropped here too.
+            if !state.sessions.contains_key(&session_id) {
+                continue;
+            }
 
             let expanded = if is_initial_load && state.expanded_ids.is_empty() {
                 true // Default to expanded on very first run
@@ -127,6 +144,16 @@ async fn sync_state(state: &mut AppState) -> Result<bool> {
         if parts.len() >= 9 {
             let id = parts[0].to_string();
             let window_id = parts[1].to_string();
+
+            // `list-panes -a` reports a shared pane once per session in the
+            // group, so our own mirror doubles every pane. Inserting the second
+            // copy pushes the pane into its window's list twice, and the tree
+            // then holds two rows with the same id: moving down from the first
+            // lands on the second, which looks exactly like the selection being
+            // stuck. Keep the first sighting and ignore repeats.
+            if state.panes.contains_key(&id) {
+                continue;
+            }
             let left = parts[5].parse().unwrap_or(0);
             let top = parts[6].parse().unwrap_or(0);
             let width = parts[7].parse().unwrap_or(0);
@@ -678,6 +705,46 @@ fn restore_window_size_blocking(session: &str, prior: &str) {
     let _ = cmd.output();
 }
 
+/// The window and pane a selection points at, for driving the mirror's own
+/// current window without touching anyone else's.
+fn window_and_pane_of(state: &AppState, id: &str) -> (Option<String>, Option<String>) {
+    if let Some(pane) = state.panes.get(id) {
+        return (Some(pane.window_id.clone()), Some(id.to_string()));
+    }
+    if state.windows.contains_key(id) {
+        return (Some(id.to_string()), None);
+    }
+    if let Some(session) = state.sessions.get(id) {
+        let window = session
+            .windows
+            .iter()
+            .find(|wid| state.windows.get(*wid).map(|w| w.active).unwrap_or(false))
+            .or_else(|| session.windows.first())
+            .cloned();
+        return (window, None);
+    }
+    (None, None)
+}
+
+/// Point the mirror's own session at a window, and at a pane within it.
+///
+/// The window is addressed as `<mirror-session>:<window>` so tmux moves *our*
+/// session's current window and leaves every other client on the window they
+/// were watching. The active pane is a property of the window itself, so that
+/// part is still shared, the same as it has always been.
+async fn select_in_mirror(mirror: &str, window: Option<&str>, pane: Option<&str>) {
+    if let Some(window) = window {
+        let _ = tokio::process::Command::new("tmux")
+            .args(["select-window", "-t", &format!("{}:{}", mirror, window)])
+            .output()
+            .await;
+    }
+    if let Some(pane) = pane {
+        let _ =
+            tokio::process::Command::new("tmux").args(["select-pane", "-t", pane]).output().await;
+    }
+}
+
 /// Map a selection id ($session / @window / %pane) to its session id.
 fn session_id_of(state: &AppState, id: &str) -> Option<String> {
     if id.starts_with('$') {
@@ -812,6 +879,81 @@ async fn restore_pinned_options() {
     }
 }
 
+/// Prefix for the throwaway sessions ttree groups with whatever it mirrors.
+/// Also how `sync_state` recognises them, so they never show up in the tree.
+const MIRROR_SESSION_PREFIX: &str = "ttree-mirror-";
+
+/// The throwaway session our preview client is attached to, kept in a static so
+/// the panic hook and the signal handler can take it down with everything else.
+static MIRROR_SESSION: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// The session the mirror client actually attaches to: a throwaway session
+/// grouped with `target` rather than `target` itself.
+///
+/// tmux has no per-client current window, it is a property of the session, so
+/// attaching straight to the user's session meant every window ttree browsed to
+/// dragged their other terminals along with it. A grouped session shares the
+/// same windows while keeping its own current window, so we can look around
+/// without touching what anyone else is looking at.
+///
+/// Cleanup is `destroy-unattached on`, but that is set by
+/// [`arm_mirror_cleanup`] only once our client is actually on the session:
+/// setting it here would have tmux destroy the session immediately, since it is
+/// created detached and is therefore already unattached.
+async fn create_mirror_session(target: &str) -> Option<String> {
+    static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let name = format!("{}{}-{}", MIRROR_SESSION_PREFIX, std::process::id(), n);
+
+    let output = tokio::process::Command::new("tmux")
+        .args(["new-session", "-d", "-t", target, "-s", &name, "-P", "-F", "#{session_id}"])
+        .output()
+        .await
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if id.is_empty() {
+        return None;
+    }
+    if let Ok(mut guard) = MIRROR_SESSION.lock() {
+        *guard = Some(id.clone());
+    }
+    Some(id)
+}
+
+/// Make the mirror session self-destruct the moment our client leaves it, which
+/// covers the cases the explicit teardown cannot: a SIGKILL, or the switch that
+/// moves our client to a session grouped with somewhere else.
+///
+/// Only safe to call once the client is attached. tmux applies
+/// `destroy-unattached` immediately, so setting it on the freshly created,
+/// still detached session would destroy it before we ever attached, leaving the
+/// preview permanently blank.
+async fn arm_mirror_cleanup(id: &str) {
+    let _ = tokio::process::Command::new("tmux")
+        .args(["set-option", "-t", id, "destroy-unattached", "on"])
+        .output()
+        .await;
+}
+
+/// Synchronous teardown for the panic hook and the signal handler.
+fn kill_mirror_session_blocking() {
+    if let Some(id) = MIRROR_SESSION.lock().ok().and_then(|mut g| g.take()) {
+        let _ = std::process::Command::new("tmux").args(["kill-session", "-t", &id]).output();
+    }
+}
+
+/// Take down the mirror session we last created, if any.
+async fn kill_mirror_session() {
+    let taken = MIRROR_SESSION.lock().ok().and_then(|mut g| g.take());
+    if let Some(id) = taken {
+        let _ =
+            tokio::process::Command::new("tmux").args(["kill-session", "-t", &id]).output().await;
+    }
+}
+
 /// The tmux socket ttree was launched against, read from `$TMUX` (the socket
 /// path is its first comma-separated field).
 ///
@@ -839,6 +981,7 @@ fn tmux_socket() -> Option<&'static str> {
 /// Put every pinned tmux option back, synchronously. Shared by the panic hook
 /// and the signal handler, both of which run outside the async restore paths.
 fn restore_pins_blocking() {
+    kill_mirror_session_blocking();
     if let Some((session, prior)) = FORCED_WINDOW_SIZE.lock().ok().and_then(|mut g| g.take()) {
         restore_window_size_blocking(&session, &prior);
     }
@@ -961,6 +1104,10 @@ async fn run_app(state: &mut AppState) -> Result<()> {
     let mut prefix_pending = false;
     // The session whose options we've currently pinned. None when not pinning.
     let mut pinned_session: Option<String> = None;
+    // The throwaway session the mirror client is attached to, and the user
+    // session it is grouped with.
+    let mut mirror_id: Option<String> = None;
+    let mut mirror_target: Option<String> = None;
     // The session whose tmux window-size we've currently pinned to `smallest`
     // (only while actively previewing). None when not pinning.
     let mut forced_session: Option<String> = None;
@@ -1007,6 +1154,16 @@ async fn run_app(state: &mut AppState) -> Result<()> {
                             client_tty = parts[3].to_string();
                             break;
                         }
+                    }
+                }
+
+                // The client sits in our grouped session, which is deliberately
+                // not in the tree, so map it back to the session it groups with
+                // before comparing it against anything the user can see. Without
+                // this the drift check below would fire every single sync.
+                if !client_session.is_empty() && Some(&client_session) == mirror_id.as_ref() {
+                    if let Some(target) = &mirror_target {
+                        client_session = target.clone();
                     }
                 }
 
@@ -1118,13 +1275,33 @@ async fn run_app(state: &mut AppState) -> Result<()> {
                 state.focus.panel = Panel::Tree;
             } else if let Some(target_id) = &state.focus.selected_id {
                 if let Some(term) = &mut active_terminal {
-                    let target_id_clone = target_id.clone();
+                    let fallback_target = target_id.clone();
                     term.target_id = target_id.clone();
+                    let want_session = session_id_of(state, target_id);
+                    let (window, pane) = window_and_pane_of(state, target_id);
 
                     if let Some(pid) = term.pty_pid {
                         if let Some(prev) = current_switch_task.take() {
                             prev.abort();
                         }
+
+                        // Staying inside the session we already group with is
+                        // just a window change in our own session. Moving to a
+                        // different one needs a new grouped session; the old
+                        // one destroys itself as soon as our client leaves it.
+                        let same_session = want_session.is_some() && want_session == mirror_target;
+                        let mirror_for_task = if same_session {
+                            mirror_id.clone()
+                        } else if let Some(target) = want_session.clone() {
+                            let created = create_mirror_session(&target).await;
+                            if created.is_some() {
+                                mirror_id = created.clone();
+                                mirror_target = Some(target);
+                            }
+                            created
+                        } else {
+                            None
+                        };
 
                         current_switch_task = Some(tokio::spawn(async move {
                             if let Ok(output) = tokio::process::Command::new("tmux")
@@ -1143,9 +1320,36 @@ async fn run_app(state: &mut AppState) -> Result<()> {
                                 }
 
                                 if let Some(tty) = client_tty {
-                                    let mut cmd = tokio::process::Command::new("tmux");
-                                    cmd.args(["switch-client", "-c", &tty, "-t", &target_id_clone]);
-                                    let _ = cmd.output().await;
+                                    match &mirror_for_task {
+                                        Some(mirror) => {
+                                            let _ = tokio::process::Command::new("tmux")
+                                                .args(["switch-client", "-c", &tty, "-t", mirror])
+                                                .output()
+                                                .await;
+                                            select_in_mirror(
+                                                mirror,
+                                                window.as_deref(),
+                                                pane.as_deref(),
+                                            )
+                                            .await;
+                                            arm_mirror_cleanup(mirror).await;
+                                        }
+                                        // No grouped session (an old tmux, or the
+                                        // create failed): fall back to attaching
+                                        // straight to the target as ttree used to.
+                                        None => {
+                                            let _ = tokio::process::Command::new("tmux")
+                                                .args([
+                                                    "switch-client",
+                                                    "-c",
+                                                    &tty,
+                                                    "-t",
+                                                    &fallback_target,
+                                                ])
+                                                .output()
+                                                .await;
+                                        }
+                                    }
                                     // Force a clean repaint of the new session so
                                     // stale cells from the previous one don't
                                     // bleed into our mirror.
@@ -1183,8 +1387,20 @@ async fn run_app(state: &mut AppState) -> Result<()> {
                         if let Some(socket) = tmux_socket() {
                             cmd.args(["-S", socket]);
                         }
-                        let target_id_clone = target_id.clone();
-                        cmd.args(["attach-session", "-t", &target_id_clone]);
+                        // Attach to a session grouped with the target rather
+                        // than to the target itself, so browsing moves our
+                        // current window and nobody else's.
+                        let want_session = session_id_of(state, target_id);
+                        let created = match &want_session {
+                            Some(target) => create_mirror_session(target).await,
+                            None => None,
+                        };
+                        if created.is_some() {
+                            mirror_id = created.clone();
+                            mirror_target = want_session.clone();
+                        }
+                        let attach_target = created.clone().unwrap_or_else(|| target_id.clone());
+                        cmd.args(["attach-session", "-t", &attach_target]);
 
                         if let Ok(mut child) = pair.slave.spawn_command(cmd) {
                             let pid = child.process_id();
@@ -1203,9 +1419,23 @@ async fn run_app(state: &mut AppState) -> Result<()> {
                             // Once the client has registered with the server,
                             // force a full repaint so leftover scrollback under
                             // the freshly-attached session doesn't bleed through.
+                            let initial =
+                                created.clone().map(|m| (m, window_and_pane_of(state, target_id)));
                             if let Some(p) = pid {
                                 tokio::spawn(async move {
                                     tokio::time::sleep(Duration::from_millis(200)).await;
+                                    // The group's current window is wherever the
+                                    // user left it, so put our own session on the
+                                    // row that is actually selected.
+                                    if let Some((mirror, (window, pane))) = initial {
+                                        select_in_mirror(
+                                            &mirror,
+                                            window.as_deref(),
+                                            pane.as_deref(),
+                                        )
+                                        .await;
+                                        arm_mirror_cleanup(&mirror).await;
+                                    }
                                     refresh_embedded_client(p).await;
                                 });
                             }
@@ -1662,6 +1892,7 @@ async fn run_app(state: &mut AppState) -> Result<()> {
     // Put back the tmux options we pinned for previewing.
     restore_forced_window_size().await;
     restore_pinned_options().await;
+    kill_mirror_session().await;
 
     if let Some(term) = active_terminal.take() {
         if let Some(pid) = term.pty_pid {
