@@ -9,10 +9,19 @@ cargo build                  # debug build
 cargo build --release        # release build
 cargo install --path .       # install binary to ~/.cargo/bin/ttree (do this after every code change)
 cargo check                  # fast type-check without linking
-cargo clippy                 # lints
+cargo test                   # unit tests
+cargo clippy --all-targets --locked -- -D warnings   # what CI runs
 ```
 
-There are no tests. The binary requires a live tmux server to run.
+Lint with that exact clippy line. A bare `cargo clippy` skips test code, so it
+passes on things CI fails.
+
+Tests are `#[cfg(test)]` modules beside the code they cover: the input layer
+(SGR mouse encoding, the forwarding gate, the OSC 52 scanner, key encoding) in
+`main.rs`, tree flattening and selection in `state.rs`, style parsing in
+`theme.rs`. They are pure functions and need no tmux. Everything else does
+require a live tmux server, and the preview in particular can only be checked
+by driving a real PTY.
 
 ## Architecture
 
