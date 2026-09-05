@@ -1,0 +1,132 @@
+# Builds and publishes macOS binaries (Apple Silicon and Intel) on tag.
+#
+# Why this lives here instead of in .gitlab-ci.yml: GitLab's shared runners do
+# not offer macOS on the free tier, so every other target (x86_64/aarch64
+# Linux glibc, musl, Android) is built in GitLab CI. Only macOS is built here,
+# on GitHub, because GitHub gives free macOS runners to public repos. This
+# repo is mirrored to GitHub at git@github.com:tek-cat/ttree.git (remote
+# "ghtc" in the GitLab checkout), so pushing a tag there (or to GitHub
+# directly) is what fires this workflow.
+#
+# Cut a macOS release by pushing the same tag used for the GitLab release,
+# e.g.: git push ghtc vX.Y.Z
+
+name: Release macOS
+
+# Quoted because a bare `on:` parses as the YAML boolean true under strict
+# YAML 1.1 tooling (GitHub's own parser special-cases it either way, but
+# quoting keeps this file unambiguous for any other YAML tool that reads it).
+"on":
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        target:
+          - aarch64-apple-darwin
+          - x86_64-apple-darwin
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Add target ${{ matrix.target }}
+        run: rustup target add ${{ matrix.target }}
+
+      # Cache cargo's download caches and the target dir, keyed on Cargo.lock
+      # and the matrix target so the two architectures never share a cache
+      # (mirrors the .cargo_cache anchor in .gitlab-ci.yml, but per target
+      # since one macOS job builds a foreign arch, unlike the Linux jobs).
+      - name: Cache cargo registry and build output
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: macos-cargo-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            macos-cargo-${{ matrix.target }}-
+
+      # Same gate as GitLab's test:cargo job: a broken tag should not ship a
+      # binary. This always runs against the host (arm64) target, since the
+      # cross target below has no runnable test host here; that matches
+      # GitLab, which also only runs the test suite on its native target.
+      - name: Run tests
+        run: cargo test --locked
+
+      # macos-latest is currently an Apple Silicon (arm64) runner, so building
+      # x86_64-apple-darwin here is a cross-compile. Unlike the aarch64 Linux
+      # job in .gitlab-ci.yml (which needs an explicit cross linker package),
+      # this needs nothing extra: Xcode's bundled toolchain already carries
+      # both architectures and cargo/rustc pick the right one from --target.
+      - name: Build release binary
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Stage binary under its release name
+        run: |
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release/ttree" "dist/ttree-${{ matrix.target }}"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ttree-${{ matrix.target }}
+          path: dist/ttree-${{ matrix.target }}
+          if-no-files-found: error
+          retention-days: 30
+
+  release:
+    name: Publish to GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    # Only publish on an actual tag push, or a workflow_dispatch run picked
+    # against a tag ref. A workflow_dispatch run against a branch just
+    # exercises the build above, since there is no tag to attach binaries to.
+    if: startsWith(github.ref, 'refs/tags/')
+    # Needed because publishing (or creating) a release writes to the repo;
+    # GITHUB_TOKEN is otherwise read-only by default.
+    permissions:
+      contents: write
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      # Use the GitHub CLI directly instead of a third-party release action:
+      # gh is preinstalled on GitHub-hosted runners, and GITHUB_TOKEN already
+      # has the permission this job needs (see job permissions above), so no
+      # extra action, and no extra trust, is required.
+      - name: Create the release if it does not already exist
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ github.ref_name }}"
+          if ! gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            gh release create "$TAG" \
+              --repo "${{ github.repository }}" \
+              --title "ttree $TAG" \
+              --generate-notes
+          fi
+
+      - name: Attach macOS binaries to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ github.ref_name }}"
+          gh release upload "$TAG" \
+            dist/ttree-aarch64-apple-darwin \
+            dist/ttree-x86_64-apple-darwin \
+            --repo "${{ github.repository }}" \
+            --clobber
