@@ -18,6 +18,10 @@ impl<'a> TreeWidget<'a> {
     }
 }
 
+/// How long after output a window still counts as busy. Long enough to catch a
+/// pane that prints in bursts, short enough that the dot means "now".
+const ACTIVITY_WINDOW: i64 = 5;
+
 fn sel_style(is_selected: bool, selection_bg: Color) -> Style {
     let bg = if is_selected { selection_bg } else { Color::Reset };
     let mut s = Style::default().bg(bg);
@@ -35,6 +39,23 @@ impl<'a> Widget for TreeWidget<'a> {
         let icon_color = self.state.theme.icon;
         let active_fg = self.state.theme.active;
         let selection_bg = self.state.theme.selection_bg;
+
+        // Windows that produced output in the last few seconds get a dot, which
+        // is the whole point of watching a fleet of panes: you want to see which
+        // one is doing something without opening it. Read once per draw so every
+        // row is judged against the same instant.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let recently_active = |last: i64| last > 0 && now.saturating_sub(last) <= ACTIVITY_WINDOW;
+        let session_active = |session: &crate::state::Session| {
+            session
+                .windows
+                .iter()
+                .filter_map(|wid| self.state.windows.get(wid))
+                .any(|w| recently_active(w.last_activity))
+        };
 
         // Ask the model which rows survive the filter instead of re-running the
         // match here: navigation, scrolling and drawing all index the same list,
@@ -120,8 +141,13 @@ impl<'a> Widget for TreeWidget<'a> {
                     let style = sel_style(is_sel, selection_bg);
                     let icon = if session.expanded { "▼" } else { "▶" };
                     let attached = if session.attached { " (attached)" } else { "" };
+                    // The marker goes before the name, not after the counts:
+                    // the sidebar is often narrow enough to cut the tail off,
+                    // and a marker you cannot see is worse than no marker.
+                    let dot = if session_active(session) { "● " } else { "" };
                     let line = Line::from(vec![
                         Span::styled(format!("{} ", icon), style.fg(icon_color)),
+                        Span::styled(dot.to_string(), style.fg(active_fg)),
                         Span::styled(session.name.clone(), style),
                         Span::styled(
                             format!(" ({}{})", total_panes, attached),
@@ -183,8 +209,10 @@ impl<'a> Widget for TreeWidget<'a> {
                     let style = sel_style(is_sel, selection_bg);
                     let icon = if session.expanded { "▼" } else { "▶" };
                     let attached = if session.attached { " (attached)" } else { "" };
+                    let dot = if session_active(session) { "● " } else { "" };
                     let line = Line::from(vec![
                         Span::styled(format!("{} ", icon), style.fg(icon_color)),
+                        Span::styled(dot.to_string(), style.fg(active_fg)),
                         Span::styled(session.name.clone(), style),
                         Span::styled(
                             format!(" ({}{})", num_windows, attached),
@@ -239,8 +267,14 @@ impl<'a> Widget for TreeWidget<'a> {
                                     let style = sel_style(is_wsel, selection_bg);
                                     let fg = if window.active { active_fg } else { Color::Reset };
                                     let wicon = if window.expanded { "▼" } else { "▶" };
+                                    let wdot = if recently_active(window.last_activity) {
+                                        "● "
+                                    } else {
+                                        ""
+                                    };
                                     let line = Line::from(vec![
                                         Span::styled(format!("  {} ", wicon), style.fg(icon_color)),
+                                        Span::styled(wdot.to_string(), style.fg(active_fg)),
                                         Span::styled(window.name.clone(), style.fg(fg)),
                                     ]);
                                     buf.set_line(area.x, y, &line, area.width);

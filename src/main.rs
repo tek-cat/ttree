@@ -45,12 +45,8 @@ fn setup_panic_hook() {
 }
 
 async fn sync_state(state: &mut AppState) -> Result<bool> {
-    let (sessions_raw, windows_raw, panes_raw) =
-        tokio::join!(Tmux::list_sessions(), Tmux::list_windows(), Tmux::list_panes());
-
-    let sessions_raw = sessions_raw.unwrap_or_default();
-    let windows_raw = windows_raw.unwrap_or_default();
-    let panes_raw = panes_raw.unwrap_or_default();
+    let (sessions_raw, windows_raw, panes_raw, clients_raw) = Tmux::snapshot().await;
+    state.clients = clients_raw;
 
     let old_panes: std::collections::HashSet<String> = state.panes.keys().cloned().collect();
 
@@ -130,6 +126,7 @@ async fn sync_state(state: &mut AppState) -> Result<bool> {
                     name: parts[2].to_string(),
                     panes: Vec::new(),
                     active: parts[3] == "1",
+                    last_activity: parts.get(6).and_then(|v| v.parse().ok()).unwrap_or(0),
                     width: parts[4].parse().unwrap_or(80),
                     height: parts[5].parse().unwrap_or(24),
                     expanded,
@@ -1163,18 +1160,9 @@ async fn run_app(state: &mut AppState) -> Result<()> {
                 let mut client_session = String::new();
                 let mut client_pane = String::new();
                 let mut client_tty = String::new();
-                if let Ok(output) = tokio::process::Command::new("tmux")
-                    .args([
-                        "list-clients",
-                        "-F",
-                        "#{client_pid} #{session_id} #{pane_id} #{client_tty}",
-                    ])
-                    .output()
-                    .await
                 {
-                    let stdout = String::from_utf8_lossy(&output.stdout);
                     let pid_s = pid.to_string();
-                    for line in stdout.lines() {
+                    for line in state.clients.iter() {
                         let parts: Vec<&str> = line.split_whitespace().collect();
                         if parts.len() == 4 && parts[0] == pid_s {
                             found = true;

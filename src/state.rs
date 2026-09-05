@@ -23,6 +23,10 @@ pub struct AppState {
     /// Colors adopted from the user's tmux status bar at startup. Not persisted;
     /// re-read from the live tmux server each launch.
     pub theme: crate::theme::Theme,
+    /// Clients as of the last sync, in `pid session pane tty` form. Kept here
+    /// so the preview loop can read them without spending another tmux process
+    /// on every tick.
+    pub clients: Vec<String>,
     /// The session ttree itself is running in, when launched from inside tmux.
     /// We refuse to mirror it (see [`AppState::mirror_suppressed`]).
     pub own_session: Option<SessionId>,
@@ -58,6 +62,7 @@ impl Default for AppState {
             last_target_id: None,
             sidebar_cols: 0,
             theme: crate::theme::Theme::default(),
+            clients: Vec::new(),
             own_session: None,
             mirror_suppressed: false,
             filter: None,
@@ -432,6 +437,10 @@ pub struct Window {
     pub name: String,
     pub panes: Vec<PaneId>,
     pub active: bool,
+    /// Unix time of the window's last activity, straight from tmux. Compared
+    /// against the clock rather than tmux's own activity flag, which only gets
+    /// set when the user has `monitor-activity` on.
+    pub last_activity: i64,
     #[allow(dead_code)]
     pub width: u16,
     #[allow(dead_code)]
@@ -588,6 +597,7 @@ mod tests {
             name: "win".into(),
             panes: panes.iter().map(|p| p.to_string()).collect(),
             active: true,
+            last_activity: 0,
             width: 80,
             height: 24,
             expanded,
