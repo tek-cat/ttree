@@ -2,6 +2,7 @@ use crate::state::AppState;
 use ratatui::{
     layout::{Alignment, Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
+    symbols,
     widgets::{Block, Borders, Clear, Paragraph},
     Frame,
 };
@@ -47,8 +48,16 @@ pub fn render(
     let body_chunks =
         Layout::horizontal([Constraint::Length(sidebar_w), Constraint::Fill(1)]).split(chunks[0]);
 
-    // Tree Sidebar
-    let tree_block = Block::default().title(" Sessions ").borders(Borders::RIGHT);
+    // Tree Sidebar. The divider to the preview is a solid block column in the
+    // tmux status-bar color, so it reads as part of the same chrome as the
+    // command bar. Both the glyph and the cell behind it get that color: fonts
+    // that render U+2588 with hairline gaps would otherwise show seams down it.
+    let bar_bg = state.theme.bar_bg;
+    let tree_block = Block::default()
+        .title(" Sessions ")
+        .borders(Borders::RIGHT)
+        .border_set(symbols::border::Set { vertical_right: "█", ..symbols::border::PLAIN })
+        .border_style(Style::default().fg(bar_bg).bg(bar_bg));
     let tree_area = tree_block.inner(body_chunks[0]);
 
     // Update scroll based on current tree area height
