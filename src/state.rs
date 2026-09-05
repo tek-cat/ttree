@@ -469,8 +469,13 @@ mod tests {
         }
     }
 
+    /// Window id, expanded, and its pane ids.
+    type WindowSpec<'a> = (&'a str, bool, &'a [&'a str]);
+    /// Session id, expanded, and its windows.
+    type SessionSpec<'a> = (&'a str, bool, &'a [WindowSpec<'a>]);
+
     /// Build a state from (session, windows, panes-per-window) descriptions.
-    fn state_with(spec: &[(&str, bool, &[(&str, bool, &[&str])])]) -> AppState {
+    fn state_with(spec: &[SessionSpec]) -> AppState {
         let mut st = AppState::default();
         for (sid, sexp, windows) in spec {
             let wids: Vec<&str> = windows.iter().map(|(wid, _, _)| *wid).collect();
