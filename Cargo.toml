@@ -1,18 +1,13 @@
-[package]
-name = "ttree"
+[workspace]
+members = ["ttree-core"]
+resolver = "2"
+
+[workspace.package]
 version = "0.2.0"
 edition = "2021"
 license = "MIT"
-description = "A tmux session manager TUI: tree navigation with a live embedded pane preview."
-repository = "https://gitlab.com/tek.cat/ttree"
-homepage = "https://ttree.tek.cat"
-documentation = "https://gitlab.com/tek.cat/ttree/-/blob/main/README.md"
-readme = "README.md"
-keywords = ["tmux", "tui", "terminal", "ratatui", "session-manager"]
-categories = ["command-line-utilities"]
-exclude = ["demo/", "docs/", "public/", "scripts/", ".gitlab-ci.yml"]
 
-[dependencies]
+[workspace.dependencies]
 ratatui        = "0.30.0"
 crossterm      = "0.28"
 tokio          = { version = "1", features = ["full"] }
@@ -26,3 +21,33 @@ directories    = "5"
 tui-term       = "0.3.4"
 vt100          = "0.16.2"
 portable-pty   = "0.9.0"
+ttree-core     = { path = "ttree-core" }
+
+[package]
+name = "ttree"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "A tmux session manager TUI: tree navigation with a live embedded pane preview."
+repository = "https://gitlab.com/tek.cat/ttree"
+homepage = "https://ttree.tek.cat"
+documentation = "https://gitlab.com/tek.cat/ttree/-/blob/main/README.md"
+readme = "README.md"
+keywords = ["tmux", "tui", "terminal", "ratatui", "session-manager"]
+categories = ["command-line-utilities"]
+exclude = ["demo/", "docs/", "public/", "scripts/", ".gitlab-ci.yml"]
+
+[dependencies]
+ratatui        = { workspace = true }
+crossterm      = { workspace = true }
+tokio          = { workspace = true }
+indexmap       = { workspace = true }
+anyhow         = { workspace = true }
+clap           = { workspace = true }
+serde          = { workspace = true }
+toml           = { workspace = true }
+fuzzy-matcher  = { workspace = true }
+directories    = { workspace = true }
+tui-term       = { workspace = true }
+vt100          = { workspace = true }
+portable-pty   = { workspace = true }

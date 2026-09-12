@@ -1822,6 +1822,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "ttree-core"
+version = "0.2.0"
+
+[[package]]
 name = "tui-term"
 version = "0.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
