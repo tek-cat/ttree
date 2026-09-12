@@ -19,6 +19,10 @@ Related: [`docs/explorations/2026-09-10-i3-tiling-direction.md`](../../explorati
 
 ## Goals
 
+- **Performance is an explicit hard requirement, not a nice-to-have.** Cheap re-layout on
+  every frame/resize, cheap focus/move mutations, no needless allocation in the render hot
+  path, and no wasted work on an idle tick. See "Core data model" below for the concrete
+  rules this implies, drawn from researching i3's and sway's actual internals.
 - Arbitrarily nested containers of live tmux panes: `SplitH`, `SplitV`, `Tabbed`,
   `Stacked`, nesting without limit, matching i3's container model.
 - Mouse support: click to focus, drag a border to resize, drag a pane to re-parent it
@@ -54,37 +58,73 @@ code is written.
 
 ## Core data model
 
+Informed by researching i3's and sway's actual internals for the performance
+requirement below - full findings in
+[`docs/explorations/2026-09-12-i3-sway-data-structures-research.md`](../../explorations/2026-09-12-i3-sway-data-structures-research.md).
+Three decisions carry over directly: an arena with typed indices instead of pointers or
+nested `Box`, a display-order list separate from a focus-order list (i3's `nodes_head` /
+`focus_head` split), and weights as the persisted truth with rects recomputed top-down
+every frame rather than stored as state (i3's `percent` vs. its explicitly-ephemeral
+`rect`).
+
 ```rust
-type LeafId = u64;
-type ContainerId = u64;
+new_key_type! { struct NodeId; } // slotmap, or an equivalent Vec<Option<Node>> + free list
 
 enum Layout { SplitH, SplitV, Tabbed, Stacked }
 
 struct Container {
-    id: ContainerId,
     layout: Layout,
-    children: Vec<(Node, Weight)>, // Weight: f32, proportional share like i3's percent
-    focused_child: usize,
-}
-
-enum Node {
-    Leaf(LeafId),
-    Container(Container),
+    parent: Option<NodeId>,
+    children: Vec<NodeId>,     // display order - a Vec, not a linked list: every layout
+                                // pass iterates all of them anyway (sway's tradeoff)
+    weights: Vec<f32>,         // parallel to children, renormalized to sum to 1.0 on
+                                // attach/detach (i3's con_fix_percent)
+    focus_order: Vec<NodeId>,  // same members as children, most-recently-focused first
+                                // (i3's focus_head), updated by remove + push-front and
+                                // bubbled to the parent on every focus change
+    rect: Rect,                // last-committed rect, cached only so a resize can skip
+                                // recursing into a subtree whose rect didn't change
 }
 
 struct Leaf {
-    id: LeafId,
-    tmux_window_id: String, // "@123"
-    parser: VtParser,       // vt100, or a replacement evaluated in the risk list below
-    rect: ratatui::layout::Rect,
+    parent: Option<NodeId>,
+    tmux_window_id: String,    // "@123"
+    parser: VtParser,          // vt100, or a replacement evaluated in the risk list below
+    rect: Rect,                // last rect actually pushed to tmux via resize-window
+    generation: u64,           // bumped when the parser processes new bytes; compared
+                                // against "last drawn" to skip re-blitting unchanged content
     title: String,
+}
+
+enum Node { Container(Container), Leaf(Leaf) }
+
+struct Tree {
+    nodes: SlotMap<NodeId, Node>,
+    root: NodeId,
+    focused: NodeId,           // O(1) "what's active" (i3's global `focused` pointer)
+    dirty: Vec<NodeId>,        // flat, idempotent list appended to by every mutation,
+                                // drained once per render tick (sway's server.dirty_nodes)
 }
 ```
 
 The root is a single `Container` (a "workspace" in i3 terms; multiple workspaces are a
-stretch goal). Weights drive proportional resize. Tree mutation (split, move, close,
-retype a container as tabbed/stacked) is pure functions over this structure and is unit
-tested without tmux, the same way `state.rs` and `theme.rs` are tested today.
+stretch goal). Tree mutation (split, move, close, retype a container as tabbed/stacked)
+is pure functions over this structure and is unit tested without tmux, the same way
+`state.rs` and `theme.rs` are tested today. Every detach also prunes degenerate
+single-child wrapper containers (i3's `tree_flatten`), so unlimited nesting doesn't
+silently become unbounded wrapper accumulation.
+
+**Performance rules, not just data shape** (see the research doc for why each one is
+safe to rely on):
+- Recompute every rect top-down from weights on every layout pass. This is cheap
+  arithmetic over a small tree - i3's own position is "correct and simple beats
+  incremental," and it's right here too.
+- Never issue a `resize-window` (or any other tmux-facing call) for a leaf whose newly
+  computed rect equals its cached one. This equality guard, not the ratatui geometry
+  math, is where ttree-tile's actual cost lives.
+- Skip the render tick entirely when `Tree.dirty` is empty and no leaf's `generation`
+  changed since the last draw - an idle tiling view should do zero work, the same way an
+  idle wlroots output does.
 
 ## tmux control-mode engine
 
@@ -179,6 +219,9 @@ throwaway probe (tens of minutes), not a milestone deliverable in itself.
 
 ## Open items intentionally left to the implementation plan
 
+- Arena crate choice for `Tree::nodes` (`slotmap` is the natural fit - typed keys,
+  O(1) remove with reuse, no unsafe) versus a hand-rolled `Vec<Option<Node>>` + free
+  list to avoid one more dependency. Decide when M1/M2 actually needs the tree.
 - Final binary/crate name (`ttree-tile` is a placeholder).
 - The exact keymap.
 - Whether `ttree` gains a way to jump into `ttree-tile` directly (e.g. a keybind that
