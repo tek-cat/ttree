@@ -68,7 +68,7 @@ test:clippy:
     - if: '$CI_COMMIT_TAG'
   script:
     - rustup component add clippy
-    - cargo clippy --all-targets --locked -- -D warnings
+    - cargo clippy --workspace --all-targets --locked -- -D warnings
 
 test:cargo:
   stage: test
@@ -80,7 +80,7 @@ test:cargo:
     - if: '$CI_COMMIT_BRANCH'
     - if: '$CI_COMMIT_TAG'
   script:
-    - cargo test --locked
+    - cargo test --workspace --locked
 
 build:linux:
   stage: build

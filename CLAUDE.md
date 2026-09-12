@@ -9,8 +9,9 @@ cargo build                  # debug build
 cargo build --release        # release build
 cargo install --path .       # install binary to ~/.cargo/bin/ttree (do this after every code change)
 cargo check                  # fast type-check without linking
-cargo test                   # unit tests
-cargo clippy --all-targets --locked -- -D warnings   # what CI runs
+cargo test --workspace        # unit tests
+cargo fmt --check             # what CI runs (formatting gate)
+cargo clippy --workspace --all-targets --locked -- -D warnings   # what CI runs
 ```
 
 Lint with that exact clippy line. A bare `cargo clippy` skips test code, so it
@@ -19,9 +20,9 @@ passes on things CI fails.
 Tests are `#[cfg(test)]` modules beside the code they cover: the input layer
 (SGR mouse encoding, the forwarding gate, the OSC 52 scanner, key encoding) in
 `ttree-core/src/input.rs`, tree flattening and selection in `src/state.rs`,
-style parsing in `ttree-core/src/theme.rs`. They are pure functions and need no tmux. Everything else does
-require a live tmux server, and the preview in particular can only be checked
-by driving a real PTY.
+style parsing in `ttree-core/src/theme.rs`. They are pure functions and need no
+tmux. Everything else does require a live tmux server, and the preview in
+particular can only be checked by driving a real PTY.
 
 ## Architecture
 
@@ -39,9 +40,9 @@ UI: the main loop, app state, and rendering.
 
 1. **`ttree-core/src/tmux_client.rs`** - thin async wrapper around `tmux` CLI. All three queries (`list-sessions`, `list-windows`, `list-panes`) use U+001F as a field separator and return raw strings.
 2. **`src/state.rs`** - parses those strings into `AppState` (IndexMaps of `Session`, `Window`, `Pane`). Also owns focus/scroll/input state and persists a subset to `~/.config/ttree/state.toml` via serde+toml (through `ttree_core::config::config_dir`).
-3. **`main.rs`** — the main loop: syncs state every 200 ms, handles all keyboard/mouse events, spawns the embedded PTY (`portable-pty`) and drives the `vt100` parser for preview rendering.
-4. **`ui/mod.rs`** — ratatui render function. Layout: full-height sidebar (tree) + fill preview, plus a 1-row command bar at the bottom.
-5. **`ui/tree.rs`** — stateless `TreeWidget` that renders the session tree with three display cases: single-leaf (no hierarchy), single-window session (session header + panes), full hierarchy (session → windows → panes).
+3. **`src/main.rs`** - the main loop: syncs state every 200 ms, handles all keyboard/mouse events, spawns the embedded PTY (`portable-pty`) and drives the `vt100` parser for preview rendering.
+4. **`src/ui/mod.rs`** - ratatui render function. Layout: full-height sidebar (tree) + fill preview, plus a 1-row command bar at the bottom.
+5. **`src/ui/tree.rs`** - stateless `TreeWidget` that renders the session tree with three display cases: single-leaf (no hierarchy), single-window session (session header + panes), full hierarchy (session → windows → panes).
 
 ### Key design decisions
 

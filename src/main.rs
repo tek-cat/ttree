@@ -19,8 +19,8 @@ use std::{
 mod state;
 mod ui;
 
-use ttree_core::actions::Actions;
 use crate::state::{AppState, EmbeddedTerminal, Panel};
+use ttree_core::actions::Actions;
 use ttree_core::input::{encode_key, encode_mouse, should_forward_mouse, Osc52Relay, Prefix};
 use ttree_core::tmux_client::Tmux;
 
