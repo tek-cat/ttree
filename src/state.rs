@@ -22,7 +22,7 @@ pub struct AppState {
     pub sidebar_cols: u16,
     /// Colors adopted from the user's tmux status bar at startup. Not persisted;
     /// re-read from the live tmux server each launch.
-    pub theme: crate::theme::Theme,
+    pub theme: ttree_core::theme::Theme,
     /// Clients as of the last sync, in `pid session pane tty` form. Kept here
     /// so the preview loop can read them without spending another tmux process
     /// on every tick.
@@ -61,7 +61,7 @@ impl Default for AppState {
             expanded_ids: HashSet::new(),
             last_target_id: None,
             sidebar_cols: 0,
-            theme: crate::theme::Theme::default(),
+            theme: ttree_core::theme::Theme::default(),
             clients: Vec::new(),
             own_session: None,
             mirror_suppressed: false,

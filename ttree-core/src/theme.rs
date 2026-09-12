@@ -3,7 +3,7 @@
 //! [`Theme::from_tmux`]); every field falls back to ttree's historical default
 //! when the option is unset or unparseable, so an unthemed tmux looks unchanged.
 
-use ttree_core::tmux_client::Tmux;
+use crate::tmux_client::Tmux;
 use ratatui::style::Color;
 
 #[derive(Debug, Clone)]
