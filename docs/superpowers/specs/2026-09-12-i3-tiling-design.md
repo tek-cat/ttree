@@ -132,7 +132,12 @@ safe to rely on):
   previous value saved/restored on exit - the same pattern ttree already uses for
   `mouse` and `set-clipboard` around the preview.
 - One tmux window per leaf. `new-window -d -t <session> -P -F '#{window_id}'` to create
-  a leaf (detached, so it never steals the terminal), `kill-window` to remove one.
+  a fresh leaf (detached, so it never steals the terminal); `move-window -s <src> -t
+  <session>:` to import an *existing* window from elsewhere on the same server as a leaf
+  instead, preserving its scrollback and running process - the mechanism that lets
+  ttree-tile tile work that's already running, not just work it spawns itself (see
+  "Isolation" below for why this requires staying on the same tmux socket). `kill-window`
+  to remove a leaf.
 - Every time the layout engine recomputes rects (resize, drag, tree mutation), diff
   against last-known per-leaf sizes and call `resize-window -t @id -x W -y H` only where
   something actually changed.
@@ -143,6 +148,56 @@ safe to rely on):
   sequence via `-H`) for mouse, translated to the leaf's local coordinates first.
 - Flow control (`refresh-client -f pause-after=<n>`) is deferred until the throughput
   spike below says it's needed.
+
+### Isolation: ambient socket, dedicated session (not a dedicated socket)
+
+ttree-tile runs on the **same tmux socket** the user's other sessions already live on,
+in **one dedicated session** reserved for it (a fixed, recognizable name, e.g.
+`ttree-tile`), not a separate server/socket. This is a deliberate choice, not the
+default by omission:
+
+- **A dedicated socket would forfeit the ability to tile pre-existing work.** tmux has
+  no cross-server operations - `move-window` and `link-window` only operate within one
+  server. If ttree-tile lived on its own socket, it could only tile windows it spawns
+  itself; it could never pull in a session (a live Claude Code agent, say) already
+  running on the user's normal server. Given ttree's whole premise is unifying view of
+  already-running work, that would cut against the point. Staying on the ambient socket
+  keeps `move-window`/`link-window` available as the mechanism for grabbing a live
+  window into the tree without killing and respawning it (preserving scrollback and
+  process state).
+- **The dedicated session is still real isolation from the user's other sessions',**
+  just at the session level rather than the server level: other sessions are never
+  resized or reparented by ttree-tile, and `window-size manual` on this one session
+  means the rest of the server's sessions are unaffected by it.
+- A `--socket`/`-L` override, mirroring the flag ttree's browser already supports (`tmux
+  -L name` / `-S /path`), is a cheap escape hatch for anyone who wants full isolation at
+  the cost of "fresh workspace only" - not the default.
+
+**What other viewers actually see**, since a plain tmux client and ttree-tile share a
+server: `tmux ls` lists the dedicated session like any other. Attaching to it directly
+with plain tmux shows one window at a time, pinned to whatever size ttree-tile last set
+via `resize-window` regardless of the attaching client's own terminal size - a client
+smaller than that window can force a "too small" state for anyone else attached, the
+same class of bug the exploration doc flagged in iTerm2's tmux integration. The existing
+`ttree` browser needs no special-casing at all: it already treats every session's
+windows uniformly, so it can list and preview any individual ttree-tile leaf through its
+normal grouped-mirror mechanism. What's invisible outside ttree-tile's own process in
+every case is the i3 *structure* - tmux only ever sees a flat window list; the
+split/tabbed/stacked nesting exists in the in-memory tree (and, from M3 on, the saved
+layout file), never in tmux itself.
+
+**Multiple ttree-tile instances against the same session is a real conflict, not a
+hypothetical.** A tmux window has exactly one size at a time - `window-size manual`
+controls how tmux picks that size, it does not give different attached clients
+different sizes. Two control-mode clients computing layouts from two different terminal
+sizes and both calling `resize-window` on the same windows would fight, each clobbering
+the other's rects. The fix: on launch, check for the reserved session name; if it's
+already running, a second instance attaches as a **non-authoritative viewer** (streams
+`%output`, renders whatever size the first instance already chose, issues no
+`resize-window` calls of its own) rather than becoming a second authority. Exactly one
+instance is ever the layout authority for a given session. This is the same shape as the
+`ttree` browser's existing preview mirroring, applied to the whole tiling session
+instead of one pane.
 
 ## Rendering / compositor
 
