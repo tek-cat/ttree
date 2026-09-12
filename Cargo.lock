@@ -1826,9 +1826,11 @@ name = "ttree-core"
 version = "0.2.0"
 dependencies = [
  "anyhow",
+ "crossterm 0.28.1",
  "directories",
  "ratatui",
  "tokio",
+ "vt100",
 ]
 
 [[package]]

@@ -5,7 +5,9 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-anyhow = { workspace = true }
+anyhow      = { workspace = true }
+crossterm   = { workspace = true }
 directories = { workspace = true }
-ratatui = { workspace = true }
-tokio  = { workspace = true }
+ratatui     = { workspace = true }
+tokio       = { workspace = true }
+vt100       = { workspace = true }

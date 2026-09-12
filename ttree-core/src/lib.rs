@@ -5,5 +5,6 @@
 
 pub mod actions;
 pub mod config;
+pub mod input;
 pub mod theme;
 pub mod tmux_client;
