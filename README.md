@@ -17,7 +17,6 @@ Built to solve a specific problem: driving many concurrent AI agent sessions run
 - Full mouse support: click to select, drag the separator to resize, scroll to navigate
 - Mouse in the preview is passed straight through to tmux, so clicking a pane, dragging to select and scrolling the scrollback behave exactly as they do in your own tmux. ttree turns tmux's `mouse` option on for the session it is mirroring and puts your previous setting back when it stops
 - Copies made in the preview are relayed onward as OSC 52, which works over SSH and through tmux
-- Activity markers: sessions and windows that produced output in the last few seconds carry a dot, so you can see which pane is working without opening it
 - Fuzzy filter (`/`) over the whole tree, keeping the parents of anything that matches so the tree stays a tree
 - Manage tmux without leaving the TUI: create sessions and windows, split panes, rename, and kill anything (kills ask first and name what they will destroy)
 - Vim-style navigation: `j` / `k` / `h` / `l`

@@ -436,10 +436,6 @@ pub struct Window {
     pub name: String,
     pub panes: Vec<PaneId>,
     pub active: bool,
-    /// Unix time of the window's last activity, straight from tmux. Compared
-    /// against the clock rather than tmux's own activity flag, which only gets
-    /// set when the user has `monitor-activity` on.
-    pub last_activity: i64,
     #[allow(dead_code)]
     pub width: u16,
     #[allow(dead_code)]
@@ -596,7 +592,6 @@ mod tests {
             name: "win".into(),
             panes: panes.iter().map(|p| p.to_string()).collect(),
             active: true,
-            last_activity: 0,
             width: 80,
             height: 24,
             expanded,

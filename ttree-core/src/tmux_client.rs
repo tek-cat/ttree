@@ -20,7 +20,7 @@ impl Tmux {
                 "S#{session_id}\u{001F}#{session_name}\u{001F}#{session_last_attached}\u{001F}#{session_attached}",
                 ";",
                 "list-windows", "-a", "-F",
-                "W#{window_id}\u{001F}#{session_id}\u{001F}#{window_name}\u{001F}#{window_active}\u{001F}#{window_width}\u{001F}#{window_height}\u{001F}#{window_activity}",
+                "W#{window_id}\u{001F}#{session_id}\u{001F}#{window_name}\u{001F}#{window_active}\u{001F}#{window_width}\u{001F}#{window_height}",
                 ";",
                 "list-panes", "-a", "-F",
                 "P#{pane_id}\u{001F}#{window_id}\u{001F}#{pane_title}\u{001F}#{pane_current_command}\u{001F}#{pane_active}\u{001F}#{pane_left}\u{001F}#{pane_top}\u{001F}#{pane_width}\u{001F}#{pane_height}",
