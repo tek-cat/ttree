@@ -191,13 +191,42 @@ hypothetical.** A tmux window has exactly one size at a time - `window-size manu
 controls how tmux picks that size, it does not give different attached clients
 different sizes. Two control-mode clients computing layouts from two different terminal
 sizes and both calling `resize-window` on the same windows would fight, each clobbering
-the other's rects. The fix: on launch, check for the reserved session name; if it's
-already running, a second instance attaches as a **non-authoritative viewer** (streams
-`%output`, renders whatever size the first instance already chose, issues no
-`resize-window` calls of its own) rather than becoming a second authority. Exactly one
-instance is ever the layout authority for a given session. This is the same shape as the
-`ttree` browser's existing preview mirroring, applied to the whole tiling session
-instead of one pane.
+the other's rects.
+
+### ttree-tile's own socket: one authority, any number of clients
+
+The fix is a second, ttree-owned Unix domain socket (`~/.config/ttree/tile-<session>.sock`),
+separate from the tmux control-mode connection, that splits `ttree-tile` into a
+server and any number of clients for a given tiling session:
+
+- The **server** is whichever `ttree-tile` process started first for that session. It
+  holds the canonical `Tree` (containers, weights, focus) and the one tmux control-mode
+  connection - it is the only thing that ever calls `resize-window` or `send-keys`.
+- A **client** is any later `ttree-tile` invocation for the same session: on launch it
+  finds the socket already listening and connects instead of starting its own tmux
+  control-mode session. It receives the full tree on connect, then a stream of diffs as
+  the server applies mutations (split, move, close, retype, focus change), and renders
+  that tree at **its own terminal size** - each client recomputes its own rects from the
+  shared weights, so two differently-sized terminals each render the same nesting
+  natively rather than one being stuck mirroring the other's exact pixels. A client's
+  input and mutation requests (focus a leaf, drag a split, close something) go back over
+  the socket for the server to apply and rebroadcast.
+- The server also relays each leaf's live content: it is the only process with the
+  control-mode connection, so it fans `%output` out per-leaf to whichever clients are
+  showing that leaf, and turns client input into `send-keys` calls. This is a thin
+  coordination layer *on top of* the one control-mode client, not a second multiplexer -
+  tmux stays the terminal engine underneath.
+- **What this does not dissolve**: a leaf's actual pane content still has only one real
+  size, whichever client is currently driving `resize-window` for it. The practical rule
+  is that input focus doubles as size authority - the client the user is actually typing
+  into drives sizing for the leaves it shows; other connected clients see that leaf
+  content slightly mismatched to their own screen until they gain focus. That is an
+  honest, workable limit, not a bug to chase - i3 itself has exactly one screen to worry
+  about and never faces this at all.
+- Build `ttree-tile` in this server-with-a-socket shape from the start (M1), even with
+  the socket unused until a second client appears. Retrofitting a client/server split
+  onto something first built as a monolith is real rework; building it thin from day one
+  is not.
 
 ## Rendering / compositor
 
@@ -242,12 +271,13 @@ spawning what's missing.
 | Milestone | Delivers | Gate before starting |
 |---|---|---|
 | M0 | Workspace split, `ttree-core` extraction, zero behavior change | - |
-| M1 | Control-mode client to a dedicated session; hardcoded 2-leaf `SplitH`; keyboard nav only | Spike: independent per-window sizing under one control client (risk 1); input latency of `send-keys` vs. a direct PTY (risk 2) |
+| M1 | Control-mode client to a dedicated session, built as a server listening on ttree-tile's own socket from the start (unused until M7); hardcoded 2-leaf `SplitH`; keyboard nav only | Spike: independent per-window sizing under one control client (risk 1); input latency of `send-keys` vs. a direct PTY (risk 2) |
 | M2 | Full recursive tree, N leaves, weighted resize, open/close a leaf | Spike: `%output` throughput with several busy panes at once (risk 3) |
 | M3 | Persistence: save and reload a layout | - |
 | M4 | Mouse: focus, border-drag resize, input passthrough to the focused leaf | - |
 | M5 | Drag-and-drop re-parenting with the drop-zone overlay | - |
 | M6 | tachyonfx animations + frozen-buffer resize | - |
+| M7 | Multi-instance sync: a second `ttree-tile` connects to the first over its socket as a client, rendering the shared tree at its own size (see "ttree-tile's own socket" above) | - |
 
 The three spikes are the ones identified in the exploration doc; each is a cheap,
 throwaway probe (tens of minutes), not a milestone deliverable in itself.
