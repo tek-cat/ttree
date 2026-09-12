@@ -16,15 +16,13 @@ use std::{
     time::Duration,
 };
 
-mod actions;
 mod state;
 mod theme;
-mod tmux_client;
 mod ui;
 
-use crate::actions::Actions;
+use ttree_core::actions::Actions;
 use crate::state::{AppState, EmbeddedTerminal, Panel};
-use crate::tmux_client::Tmux;
+use ttree_core::tmux_client::Tmux;
 
 fn setup_panic_hook() {
     let default_hook = std::panic::take_hook();

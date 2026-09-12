@@ -51,3 +51,4 @@ directories    = { workspace = true }
 tui-term       = { workspace = true }
 vt100          = { workspace = true }
 portable-pty   = { workspace = true }
+ttree-core     = { workspace = true }
