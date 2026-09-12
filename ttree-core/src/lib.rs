@@ -4,5 +4,6 @@
 //! for why this crate exists.
 
 pub mod actions;
+pub mod config;
 pub mod theme;
 pub mod tmux_client;

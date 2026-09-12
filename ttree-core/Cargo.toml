@@ -6,5 +6,6 @@ license.workspace = true
 
 [dependencies]
 anyhow = { workspace = true }
+directories = { workspace = true }
 ratatui = { workspace = true }
 tokio  = { workspace = true }

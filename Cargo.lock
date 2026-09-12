@@ -1809,7 +1809,6 @@ dependencies = [
  "anyhow",
  "clap",
  "crossterm 0.28.1",
- "directories",
  "fuzzy-matcher",
  "indexmap",
  "portable-pty",
@@ -1827,6 +1826,7 @@ name = "ttree-core"
 version = "0.2.0"
 dependencies = [
  "anyhow",
+ "directories",
  "ratatui",
  "tokio",
 ]

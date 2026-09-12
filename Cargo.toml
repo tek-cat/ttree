@@ -47,7 +47,6 @@ clap           = { workspace = true }
 serde          = { workspace = true }
 toml           = { workspace = true }
 fuzzy-matcher  = { workspace = true }
-directories    = { workspace = true }
 tui-term       = { workspace = true }
 vt100          = { workspace = true }
 portable-pty   = { workspace = true }

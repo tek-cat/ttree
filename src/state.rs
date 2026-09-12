@@ -82,9 +82,8 @@ struct Row {
 
 impl AppState {
     pub fn save_to_disk(&self) {
-        if let Some(proj_dirs) = directories::ProjectDirs::from("com", "tek", "ttree") {
-            let config_dir = proj_dirs.config_dir();
-            let _ = std::fs::create_dir_all(config_dir);
+        if let Some(config_dir) = ttree_core::config::config_dir() {
+            let _ = std::fs::create_dir_all(&config_dir);
             let state_path = config_dir.join("state.toml");
 
             let mut expanded_ids: Vec<String> = self
@@ -110,8 +109,8 @@ impl AppState {
 
     pub fn load_from_disk() -> Self {
         let mut state = Self::default();
-        if let Some(proj_dirs) = directories::ProjectDirs::from("com", "tek", "ttree") {
-            let state_path = proj_dirs.config_dir().join("state.toml");
+        if let Some(config_dir) = ttree_core::config::config_dir() {
+            let state_path = config_dir.join("state.toml");
             if let Ok(content) = std::fs::read_to_string(state_path) {
                 if let Ok(persistent) = toml::from_str::<PersistentState>(&content) {
                     state.focus = persistent.focus;
